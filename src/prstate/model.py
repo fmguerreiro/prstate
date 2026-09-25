@@ -155,6 +155,19 @@ class BotFinding:
 
 
 @dataclass(frozen=True, slots=True)
+class ViewerReview:
+    """The viewer's own latest review. Absent from approved_by/changes_requested_by,
+    which list everyone except the viewer, so it has nowhere else to live."""
+
+    state: str                   # APPROVED | CHANGES_REQUESTED | COMMENTED | DISMISSED
+    submitted_at: datetime
+    head_oid: str | None         # the commit reviewed, when GitHub reports it
+
+    def to_dict(self, *, full: bool = False) -> dict:
+        return _as_dict(self, full=full)
+
+
+@dataclass(frozen=True, slots=True)
 class Reason:
     kind: ReasonKind
     detail: str
@@ -176,6 +189,9 @@ class PullRequest:
     mergeable: str | None
     merge_state: str | None
     review_decision: str | None
+    viewer_review: ViewerReview | None
+    review_requested_from: tuple[str, ...]
+    head_oid: str | None
     approved_by: tuple[str, ...]
     changes_requested_by: tuple[str, ...]
     ci: Ci
