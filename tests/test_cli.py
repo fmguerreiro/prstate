@@ -151,6 +151,38 @@ def test_pr_flag_bypasses_discovery(stub, capsys):
     assert fetch.kwargs == {"refs": [("o/n", 7)], "repo": "o/n", "limit": 200}
 
 
+def test_a_named_draft_is_returned_not_filtered_away(stub, capsys):
+    # The draft filter keeps a sweep readable; --pr already named the one PR wanted,
+    # so applying it there answers a question nobody asked.
+    stub(make_sweep(make_pr(7, draft=True)))
+
+    code, out, _ = run(capsys, ["--repo", "o/n", "--pr", "7", "--json"])
+
+    assert code == 0
+    assert [pr["number"] for pr in json.loads(out)["prs"]] == [7]
+
+
+def test_all_orgs_with_any_author_is_refused(stub, capsys):
+    # Neither an owner nor an author leaves gh search unconstrained, which returns
+    # strangers' public repositories.
+    stub(make_sweep(make_pr()))
+
+    code, _out, err = run(capsys, ["--all-orgs", "--any-author", "--json"])
+
+    assert code == 2
+    assert "all of GitHub" in err
+
+
+def test_all_orgs_with_a_reviewer_filter_is_allowed(stub, capsys):
+    # The reviewer filter is the constraint, so the sweep is bounded after all.
+    stub(make_sweep(make_pr()))
+
+    code, _out, _err = run(capsys, ["--all-orgs", "--any-author",
+                                    "--review-requested", "--json"])
+
+    assert code == 0
+
+
 def test_any_author_sends_no_author_filter(stub, capsys):
     stub_fetch = stub(make_sweep(make_pr()))
 

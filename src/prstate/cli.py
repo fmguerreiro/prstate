@@ -88,6 +88,12 @@ def _reject_conflicts(parser: argparse.ArgumentParser, args: argparse.Namespace)
     if args.pr is None:
         if "--author" in named and "--any-author" in named:
             parser.error("--any-author and --author contradict each other")
+        if (args.all_orgs and args.any_author
+                and not (args.review_requested or args.reviewed_by)):
+            # Dropping the owner and the author together leaves gh search with no
+            # constraint at all, so the sweep returns strangers' public repos.
+            parser.error("--all-orgs --any-author searches all of GitHub; "
+                         "name an owner with --org, or add a reviewer filter")
         return
     if not args.repo:
         parser.error("--pr needs --repo to say which repository the number is in")
@@ -98,7 +104,9 @@ def _reject_conflicts(parser: argparse.ArgumentParser, args: argparse.Namespace)
 
 
 def _keep(pr: PullRequest, args: argparse.Namespace) -> bool:
-    if pr.draft and not args.include_drafts:
+    # --pr named this PR outright. Dropping it for being a draft answers a question
+    # nobody asked: the draft filter exists to keep a sweep readable.
+    if pr.draft and not args.include_drafts and args.pr is None:
         return False
     if args.owed and not pr.owed:
         return False
