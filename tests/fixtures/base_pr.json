@@ -1,0 +1,24 @@
+{
+  "number": 1,
+  "title": "t",
+  "url": "u",
+  "isDraft": false,
+  "createdAt": "2026-01-01T00:00:00Z",
+  "updatedAt": "2026-01-10T00:00:00Z",
+  "mergeable": "MERGEABLE",
+  "mergeStateStatus": "CLEAN",
+  "reviewDecision": "REVIEW_REQUIRED",
+  "baseRefName": "main",
+  "headRefName": "h",
+  "headRefOid": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c",
+  "author": {"login": "me"},
+  "commits": {"nodes": [{"commit": {
+    "committedDate": "2026-01-02T00:00:00Z",
+    "statusCheckRollup": null
+  }}]},
+  "reviews": {"nodes": []},
+  "reviewThreads": {"nodes": []},
+  "comments": {"nodes": []},
+  "reviewRequests": {"nodes": []},
+  "_repo": "o/r"
+}
