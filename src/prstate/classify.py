@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from prstate.model import (
     DELETED,
@@ -54,7 +54,8 @@ CLEAN_PHRASE_RE = re.compile(r"\bno blocking findings\b|\bnothing (?:is |was )?b
                              re.IGNORECASE)
 BUG_LINE_RE = re.compile(r"^\s*(?:bug|issue)\s*:", re.IGNORECASE | re.MULTILINE)
 
-_ORDER_FLOOR = datetime.min.replace(tzinfo=timezone.utc)
+_ORDER_FLOOR = datetime.min.replace(tzinfo=UTC)
+_ORDER_CEILING = datetime.max.replace(tzinfo=UTC)
 
 THREAD_REASON = "unresolved thread, last human word is theirs"
 COMMENT_REASON = "issue comment with no later reply from you"
@@ -90,6 +91,11 @@ def is_bot(login: str | None) -> bool:
         return False
     low = login.lower()
     return "[bot]" in low or low in BOT_LOGINS
+
+
+def author_is_bot(node: dict | None) -> bool:
+    author = (node or {}).get("author") or {}
+    return author.get("__typename") == "Bot" or is_bot(author.get("login"))
 
 
 def is_bot_summary(text: str) -> bool:
@@ -266,13 +272,15 @@ def thread_last(thread: dict) -> dict | None:
 def thread_comments(thread: dict) -> list[dict]:
     seen: set[tuple] = set()
     out = []
-    for comment in ((thread.get("opener") or {}).get("nodes") or []) + \
-                   ((thread.get("recent") or {}).get("nodes") or []):
-        key = (login_of(comment), comment.get("createdAt"))
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(comment)
+    for name in ("opener", "activity", "recent"):
+        for comment in (thread.get(name) or {}).get("nodes") or []:
+            key = ((comment.get("id"),) if comment.get("id") else
+                   (login_of(comment), comment.get("createdAt"), comment.get("body")))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(comment)
+    out.sort(key=lambda comment: parse_time(comment.get("createdAt")) or _ORDER_FLOOR)
     return out
 
 
@@ -283,12 +291,14 @@ def unread_thread_middles(pr: dict, viewer: str) -> list[str]:
         if thread["isResolved"]:
             continue
         total = (thread.get("recent") or {}).get("totalCount")
-        seen = len(thread_comments(thread))
+        ends = thread_comments(thread)
+        seen = len(ends)
         if total is not None and total <= seen:
             continue
-        ends = thread_comments(thread)
-        newest = login_of(ends[-1]) if ends else DELETED
-        if newest == viewer or not is_bot(newest):
+        if not ends:
+            continue
+        newest = login_of(ends[-1])
+        if newest == viewer or not author_is_bot(ends[-1]):
             continue
         if total is None:
             # Same call as the check rollup: an absent count is not a zero.
@@ -324,11 +334,27 @@ def viewer_activity_times(pr: dict, viewer: str) -> list[datetime]:
     return [t for t in times if t]
 
 
+def _thread_gap_until(pr: dict) -> datetime | None:
+    """Latest time an unread thread comment may have answered a review body."""
+    if pr.get("_thread_activity_complete") is not False:
+        return None
+    bounds = []
+    for thread in pr["reviewThreads"]["nodes"] or []:
+        if thread.get("_activity_complete") is not False:
+            continue
+        last = thread_last(thread)
+        newest = parse_time(last.get("createdAt")) if last else None
+        if newest is None:
+            return _ORDER_CEILING
+        bounds.append(newest)
+    return max(bounds, default=_ORDER_CEILING)
+
+
 def owed(pr: dict, viewer: str) -> tuple[Owed, ...]:
     """Human review signals with no later response from the viewer.
 
     Three surfaces, each with its own notion of "answered":
-      - review thread: unresolved and the last comment is not the viewer's
+      - review thread: unresolved and its newest visible human comment is theirs
       - issue comment: no comment by the viewer after it
       - review body: no activity at all by the viewer after it (a push counts,
         since a review body usually asks for a code change)
@@ -338,6 +364,7 @@ def owed(pr: dict, viewer: str) -> tuple[Owed, ...]:
     """
     signals: list[Owed] = []
     mine = viewer_activity_times(pr, viewer)
+    gap_until = _thread_gap_until(pr)
     my_comment_times = [
         parse_time(c["createdAt"]) for c in (pr["comments"]["nodes"] or [])
         if login_of(c) == viewer
@@ -347,28 +374,20 @@ def owed(pr: dict, viewer: str) -> tuple[Owed, ...]:
         if thread["isResolved"]:
             continue
         first = thread_opener(thread)
-        last = thread_last(thread) or first
         if not first:
             continue
+        comments = thread_comments(thread)
+        last = comments[-1] if comments else first
         total = (thread.get("recent") or {}).get("totalCount")
-        seen = len(thread_comments(thread))
-        if is_bot(login_of(last)) and (total is None or total > seen):
+        if author_is_bot(last) and (total is None or total > len(comments)):
             continue
-        # Human obligations follow the newest visible human end regardless of
-        # who opened the thread. bot_findings independently tracks bot ownership.
-        # A trailing bot comment does not close a human ask. Only the two ends
-        # are fetched; partial_reasons reports an unread middle separately.
-        ends = [c for c in (first, last) if c]
         human = None
-        for candidate in reversed(ends):
+        for candidate in reversed(comments):
             who = login_of(candidate)
             if who == viewer:
-                human = None  # my own comment is the newest; nothing owed
                 break
-            if is_bot(who):
+            if author_is_bot(candidate) or _minimized(candidate):
                 continue
-            if _minimized(candidate):
-                continue  # D3: a hidden ask is not outstanding
             human = candidate
             break
         if not human:
@@ -388,7 +407,7 @@ def owed(pr: dict, viewer: str) -> tuple[Owed, ...]:
 
     for comment in pr["comments"]["nodes"] or []:
         author = login_of(comment)
-        if author == viewer or is_bot(author) or _minimized(comment):
+        if author == viewer or author_is_bot(comment) or _minimized(comment):
             continue
         when = parse_time(comment["createdAt"])
         if any(t > when for t in my_comment_times):
@@ -408,7 +427,7 @@ def owed(pr: dict, viewer: str) -> tuple[Owed, ...]:
 
     for review in pr["reviews"]["nodes"] or []:
         author = login_of(review)
-        if author == viewer or is_bot(author) or _minimized(review):
+        if author == viewer or author_is_bot(review) or _minimized(review):
             continue
         if review["state"] not in ("CHANGES_REQUESTED", "COMMENTED"):
             continue
@@ -416,6 +435,8 @@ def owed(pr: dict, viewer: str) -> tuple[Owed, ...]:
         if not body:
             continue
         when = parse_time(review["submittedAt"])
+        if gap_until is not None and when < gap_until:
+            continue
         if any(t > when for t in mine):
             continue
         signals.append(Owed(
@@ -440,7 +461,7 @@ def _summary_candidates(pr: dict) -> list[dict]:
     for comment in pr["comments"]["nodes"] or []:
         login = login_of(comment)
         text = comment.get("body") or ""
-        if not is_bot(login) or not is_bot_summary(text):
+        if not author_is_bot(comment) or not is_bot_summary(text):
             continue
         out.append({"id": comment.get("id"), "login": login, "surface": Surface.COMMENT,
                     "at": parse_time(comment["createdAt"]), "body": text.strip(),
@@ -449,7 +470,7 @@ def _summary_candidates(pr: dict) -> list[dict]:
     for review in pr["reviews"]["nodes"] or []:
         login = login_of(review)
         text = review.get("body") or ""
-        if not is_bot(login) or not is_bot_summary(text):
+        if not author_is_bot(review) or not is_bot_summary(text):
             continue
         out.append({"id": review.get("id"), "login": login, "surface": Surface.REVIEW,
                     "at": parse_time(review["submittedAt"]), "body": text.strip(),
@@ -515,7 +536,7 @@ def bot_findings(pr: dict, viewer: str) -> tuple[BotFinding, ...]:
         if thread["isResolved"]:
             continue
         first = thread_opener(thread)
-        if not first or not is_bot(login_of(first)):
+        if not first or not author_is_bot(first):
             continue
         body = _body_of(first)
         findings.append(BotFinding(
@@ -540,7 +561,7 @@ def bot_findings(pr: dict, viewer: str) -> tuple[BotFinding, ...]:
         Surface.COMMENT: [parse_time(c["createdAt"]) for c in (pr["comments"]["nodes"] or [])
                           if login_of(c) == viewer],
         Surface.REVIEW: [parse_time(r["submittedAt"]) for r in (pr["reviews"]["nodes"] or [])
-                         if login_of(r) == viewer],
+                         if login_of(r) == viewer and r.get("submittedAt")],
     }
     candidates = _summary_candidates(pr)
     _apply_supersede(candidates)
@@ -723,7 +744,7 @@ def classify(raw_pr: dict, viewer: str, now: datetime) -> PullRequest:
     latest_review_by: dict[str, dict] = {}
     for review in raw_pr["reviews"]["nodes"] or []:
         author = login_of(review)
-        if author == viewer or is_bot(author) or review["state"] not in (
+        if author == viewer or author_is_bot(review) or review["state"] not in (
             "APPROVED", "CHANGES_REQUESTED", "DISMISSED"
         ):
             continue

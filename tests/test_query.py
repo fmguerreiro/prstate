@@ -88,6 +88,12 @@ def test_every_comment_surface_is_selected_with_its_minimize_state(surface):
     assert "id" in selection
 
 
+@pytest.mark.parametrize("surface", SURFACES)
+def test_every_comment_surface_selects_the_author_actor_type(surface):
+    selection = block(q.pr_query([("o/n", 7)]), surface)
+    assert "__typename" in selection
+
+
 def test_thread_comments_carry_minimize_state_on_both_ends():
     threads = block(q.pr_query([("o/n", 7)]), r"reviewThreads\(first: \d+\)")
     assert threads.count("isMinimized") == 2
@@ -135,7 +141,7 @@ def test_merge_query_asks_only_for_the_merge_state():
     assert "reviewThreads" not in text and "comments" not in text
 
 
-@pytest.mark.parametrize("build", [q.pr_query, q.rollup_query, q.merge_query])
+@pytest.mark.parametrize("build", [q.pr_query, q.rollup_query, q.merge_query, q.thread_query])
 def test_an_empty_request_is_rejected_not_sent_as_an_empty_query(build):
     with pytest.raises(ValueError):
         build([])
@@ -145,6 +151,7 @@ def test_an_empty_request_is_rejected_not_sent_as_an_empty_query(build):
     (q.pr_query, ("o/n", 7)),
     (q.rollup_query, ("o/n", 7, "c")),
     (q.merge_query, ("o/n", 7)),
+    (q.thread_query, ("PRRT_kwDO", "c")),
 ])
 def test_no_query_is_a_mutation_or_asks_for_pushed_date(build, ref):
     text = build([ref])
@@ -157,3 +164,39 @@ def test_a_repo_name_with_a_quote_is_escaped_not_injected():
     text = q.pr_query([('o/n"} evil {x', 7)])
     assert r'name: "n\"} evil {x"' in text
     assert 'name: "n"}' not in text
+
+
+def test_the_thread_continuation_pages_from_the_named_constant():
+    text = q.thread_query([("PRRT_kwDO", None)])
+    assert re.findall(r"comments\(first: (\d+)", text) == [str(q.THREAD_COMMENT_PAGE)]
+
+
+def test_changing_the_thread_page_constant_changes_the_query(monkeypatch):
+    monkeypatch.setattr(q, "THREAD_COMMENT_PAGE", 3)
+    assert "comments(first: 3" in q.thread_query([("PRRT_kwDO", None)])
+
+
+def test_the_thread_continuation_selects_the_comment_fields_the_pr_query_does():
+    opener = block(q.pr_query([("o/n", 7)]), r"opener: comments\(first: 1\)")
+    page = block(q.thread_query([("PRRT_kwDO", None)]), r"comments\(first: \d+[^)]*\)")
+    assert " ".join(block(opener, r"nodes\b").split()) == \
+        " ".join(block(page, r"nodes\b").split())
+
+
+def test_the_thread_continuation_pages_and_reports_its_total():
+    page = block(q.thread_query([("PRRT_kwDO", "c")]), r"comments\(first: \d+[^)]*\)")
+    assert "hasNextPage" in page and "endCursor" in page
+    assert "totalCount" in page
+
+
+def test_thread_query_addresses_each_thread_by_its_own_id_and_cursor():
+    text = q.thread_query([("PRRT_one", None), ("PRRT_two", "CURSOR")])
+    assert re.findall(r'node\(id: "(\w+)"\)', text) == ["PRRT_one", "PRRT_two"]
+    assert re.findall(r"after: (null|\"\w+\")", text) == ["null", '"CURSOR"']
+    assert "t0: node" in text and "t1: node" in text
+
+
+def test_a_thread_id_with_a_quote_is_escaped_not_injected():
+    text = q.thread_query([('T"} evil {x', None)])
+    assert r'node(id: "T\"} evil {x")' in text
+    assert 'id: "T"}' not in text

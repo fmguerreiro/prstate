@@ -22,6 +22,7 @@ from prstate import query
 from prstate.model import Sweep
 
 READ_ONLY_SUBCOMMANDS = {"search", "api", "auth", "repo"}
+
 READ_ONLY_ENDPOINTS = {"graphql", "user"}
 READ_ONLY_REPO_VERBS = {"view"}
 QUERY_FLAGS = {"-f", "--raw-field"}
@@ -47,10 +48,10 @@ class GhError(RuntimeError):
 def _flag_name(token: str) -> str:
     """The flag a token names, ignoring any attached value.
 
-    `--field=x` and `--field x` are the same write to gh, so the check has to see
-    through the `=` form or the allowlist reads as a suggestion.
+    `--field=x`, `-Fname=x`, and their split forms name the same write flags.
     """
-    return token.split("=", 1)[0]
+    name = token.split("=", 1)[0]
+    return name[:2] if name.startswith("-") and not name.startswith("--") else name
 
 
 def _reject_flags(forbidden: set[str], parts: tuple[str, ...]) -> None:
@@ -84,6 +85,9 @@ def argv(*parts: str) -> list[str]:
         # allowed: this is the set that must be absent, and a reader who inverts
         # that ships a write.
         _reject_flags(WRITE_FLAGS - QUERY_FLAGS if endpoint == "graphql" else WRITE_FLAGS, parts)
+    elif parts[0] == "auth":
+        if parts != ("auth", "status"):
+            raise GhError(f"gh auth call is not on the read-only allowlist: {list(parts)}")
     elif parts[0] == "repo":
         verb = parts[1] if len(parts) > 1 else ""
         if verb not in READ_ONLY_REPO_VERBS:
@@ -209,17 +213,21 @@ def _body_nodes(node: dict):
     for key in ("reviews", "comments"):
         yield from (node.get(key) or {}).get("nodes") or []
     for thread in (node.get("reviewThreads") or {}).get("nodes") or []:
-        for side in ("opener", "recent"):
+        for side in ("opener", "activity", "recent"):
             yield from (thread.get(side) or {}).get("nodes") or []
+
+
+def _trim_nodes(items) -> None:
+    for item in items:
+        body = item.get("body")
+        if isinstance(body, str) and len(body) > query.BODY_CHARS:
+            item["body"] = body[:query.BODY_CHARS]
 
 
 def _trim_bodies(node: dict) -> None:
     """Cut every fetched body to BODY_CHARS in this one place, right after parsing,
     so no rule downstream has to remember which surface it came from."""
-    for item in _body_nodes(node):
-        body = item.get("body")
-        if isinstance(body, str) and len(body) > query.BODY_CHARS:
-            item["body"] = body[:query.BODY_CHARS]
+    _trim_nodes(_body_nodes(node))
 
 
 def fetch_details(refs: list[tuple[str, int]]) -> tuple[dict[str, dict], list[str]]:
@@ -247,6 +255,7 @@ def fetch_details(refs: list[tuple[str, int]]) -> tuple[dict[str, dict], list[st
                 continue
             node["_repo"] = repo
             node["_partial"] = []
+            node["_thread_activity_complete"] = True
             _trim_bodies(node)
             payloads[f"{repo}#{node.get('number', number)}"] = node
     return payloads, partial
@@ -279,8 +288,9 @@ def _stop_paging(contexts: dict | None) -> None:
 def _paginate_rollups(payloads: dict[str, dict]) -> None:
     """Follow the rollup's own cursor instead of declaring >100 contexts unreadable.
 
-    The other three connections still declare partial rather than paginate: a PR with
-    more than 100 review threads is pathological and the flag is honest. A rollup with
+    The review threads' comments page the same way in _paginate_thread_activity. The
+    remaining connections still declare partial rather than paginate: a PR with more
+    than 100 review threads is pathological and the flag is honest. A rollup with
     more than 100 contexts is a normal monorepo.
     """
     for _ in range(query.MAX_ROLLUP_PAGES):
@@ -305,6 +315,99 @@ def _paginate_rollups(payloads: dict[str, dict]) -> None:
     for node in payloads.values():
         if _has_next(_rollup_contexts(node)):
             node["_partial"].append("the check rollup had more pages than prstate read")
+
+
+def _threads(node: dict) -> list[dict]:
+    return (node.get("reviewThreads") or {}).get("nodes") or []
+
+
+def _comment_key(comment: dict):
+    return comment.get("id") or ((comment.get("author") or {}).get("login"),
+                                 comment.get("createdAt"))
+
+
+def _known_comments(thread: dict) -> list[dict]:
+    """The thread's comments already in hand, deduplicated: on a short thread the
+    opener and the newest comment are the same one."""
+    seen: set = set()
+    out = []
+    for side in ("opener", "activity", "recent"):
+        for comment in (thread.get(side) or {}).get("nodes") or []:
+            key = _comment_key(comment)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(comment)
+    return out
+
+
+def _wants_page(thread: dict) -> bool:
+    activity = thread.get("activity")
+    if activity is not None:
+        return bool((activity.get("pageInfo") or {}).get("hasNextPage"))
+    total = (thread.get("recent") or {}).get("totalCount")
+    # An absent count is not a zero, and it is not a gap either: classify already
+    # reports a thread that refused to count itself.
+    return isinstance(total, int) and total > len(_known_comments(thread))
+
+
+def _stop_thread(thread: dict) -> None:
+    activity = thread.setdefault("activity", {"nodes": []})
+    activity["pageInfo"] = dict(activity.get("pageInfo") or {}, hasNextPage=False)
+
+
+def _thread_gap(node: dict, thread: dict, what: str) -> None:
+    node["_thread_activity_complete"] = False
+    thread["_activity_complete"] = False
+    reason = f"the comments of a thread on {thread.get('path')} {what}"
+    if reason not in node["_partial"]:
+        node["_partial"].append(reason)
+
+
+def _read_thread_page(chunk: list[tuple[dict, dict]]) -> None:
+    body, _stderr = run_graphql(query.thread_query(
+        [(thread["id"], ((thread.get("activity") or {}).get("pageInfo") or {}).get("endCursor"))
+         for _node, thread in chunk]))
+    data = body.get("data") or {}
+    for idx, (node, thread) in enumerate(chunk):
+        more = ((data.get(f"t{idx}") or {}).get("comments")) or {}
+        page = more.get("pageInfo") or {}
+        nodes = more.get("nodes")
+        # A missing successor cursor stops pagination; retrying would repeat the same page.
+        if not isinstance(nodes, list) or (page.get("hasNextPage") and not page.get("endCursor")):
+            _stop_thread(thread)
+            _thread_gap(node, thread, "could not be read")
+            continue
+        activity = thread.setdefault("activity", {"nodes": []})
+        _trim_nodes(nodes)
+        activity["nodes"] = (activity.get("nodes") or []) + nodes
+        activity["pageInfo"] = page or {"hasNextPage": False}
+
+
+def _paginate_thread_activity(payloads: dict[str, dict]) -> None:
+    """Viewer replies between thread endpoints change whether human signals are owed."""
+    for node in payloads.values():
+        node.setdefault("_thread_activity_complete", True)
+    for _ in range(query.MAX_THREAD_PAGES):
+        pending = []
+        for node in payloads.values():
+            for thread in _threads(node):
+                if not _wants_page(thread):
+                    continue
+                if not thread.get("id"):
+                    _stop_thread(thread)
+                    _thread_gap(node, thread, "have no thread id to page from")
+                    continue
+                pending.append((node, thread))
+        if not pending:
+            return
+        for chunk in query.batches(pending):
+            _read_thread_page(chunk)
+    for node in payloads.values():
+        for thread in _threads(node):
+            if _wants_page(thread):
+                node["_thread_activity_complete"] = False
+                _thread_gap(node, thread, "ran to more pages than prstate read")
 
 
 def repoll_mergeable(payloads: dict[str, dict], attempts: int = 3, wait: float = 4.0) -> None:
@@ -370,6 +473,7 @@ def fetch(*, author: str | None = "@me", reviewer: str | None = None,
         refs = [(row["repository"]["nameWithOwner"], row["number"]) for row in found]
     payloads, partial = fetch_details(refs)
     _paginate_rollups(payloads)
+    _paginate_thread_activity(payloads)
     repoll_mergeable(payloads)
     now = dt.datetime.now(dt.timezone.utc)
     prs = []

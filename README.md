@@ -21,7 +21,8 @@ Read-only. It never posts, resolves, approves, or merges.
 ## Install
 
 ```bash
-uv tool install git+https://github.com/fmguerreiro/prstate
+pipx install git+https://github.com/fmguerreiro/prstate
+# or: uv tool install git+https://github.com/fmguerreiro/prstate
 ```
 
 Requires `gh` on PATH and authenticated; prstate inherits that auth.
@@ -36,6 +37,30 @@ prstate --all-orgs --json     # every owner, machine-readable
 ```
 
 `--json` is the stable contract; `schema_version` tracks it.
+
+### Python
+
+```python
+import prstate
+
+sweep = prstate.fetch(owner="SakanaAIBusiness", author="@me")
+for pr in sweep.prs:
+    print(pr.ci, pr.owed, pr.bot_findings)
+```
+
+`Sweep.partial` and each `PullRequest.partial` name reads GitHub could not complete. Do
+not treat a partial result as a clean pull request.
+
+## Trust boundary
+
+`prstate` treats GitHub titles, bodies, reviewer names, workflow names, and API errors as
+untrusted. Human-readable output removes terminal control characters. Full bodies appear
+only with `--full`; JSON output retains data but cannot execute terminal controls.
+
+The process shells out only through one checked `gh` command builder. It permits pull
+request search, read-only GraphQL and user reads, repository owner lookup, and
+`gh auth status`. It rejects GraphQL mutations, write HTTP methods and fields, every
+other auth command, and token display. It never reads or prints a token directly.
 
 ## Design
 

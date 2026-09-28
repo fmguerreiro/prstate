@@ -18,6 +18,7 @@ from prstate.classify import (
     latest_per_check,
     owed,
     parse_bot_verdict,
+    thread_comments,
 )
 from prstate.model import BotState, CiState, ReasonKind, Surface
 from prstate.query import THREAD_PAGE
@@ -70,6 +71,13 @@ def test_bot_comments_are_never_owed():
     assert owed(payload, ME) == ()
 
 
+def test_github_bot_actor_is_not_owed_without_a_bot_login_suffix():
+    payload = pr(comments={"nodes": [
+        comment("sakana-ai-github-app", at(5), "plan", actor_type="Bot"),
+    ]})
+    assert owed(payload, ME) == ()
+
+
 def test_minimized_human_comment_is_not_owed():
     payload = pr(comments={"nodes": [
         comment("them", at(5), "q?", minimized=True, reason="OFF_TOPIC"),
@@ -109,9 +117,27 @@ def test_thread_where_i_spoke_last_is_not_owed():
     assert owed(payload, ME) == ()
 
 
+def test_minimized_viewer_reply_still_answers_thread():
+    payload = pr(reviewThreads={"nodes": [
+        thread(comment("them", at(5), "q"),
+               comment(ME, at(6), "a", minimized=True, reason="OFF_TOPIC")),
+    ]})
+    assert owed(payload, ME) == ()
+
+
 def test_unresolved_thread_with_their_last_word_is_owed():
     payload = pr(reviewThreads={"nodes": [thread(comment("them", at(5), "q"))]})
     assert [(s.by, s.surface) for s in owed(payload, ME)] == [("them", Surface.THREAD)]
+
+
+def test_unresolved_outdated_human_thread_remains_owed():
+    payload = pr(reviewThreads={"nodes": [
+        thread(comment("colleague", at(5), "still broken"), outdated=True),
+    ]})
+    row = classify(payload, ME, NOW)
+    assert [(signal.by, signal.surface, signal.outdated) for signal in row.owed] == [
+        ("colleague", Surface.THREAD, True),
+    ]
 
 
 def test_resolved_thread_is_not_owed():
@@ -133,15 +159,40 @@ def test_owed_follows_the_recent_connection_not_the_first_page():
     assert signals[0].at == dt.datetime(2026, 1, 8, tzinfo=dt.timezone.utc)
 
 
-def test_human_reply_in_a_bot_thread_is_owed_and_the_bot_thread_stays_open():
-    payload = pr(reviewThreads={"nodes": [
-        thread(comment("greptile-apps[bot]", at(5), "nit"),
-               comment("colleague", at(6), "agreed, real bug, please fix")),
-    ]})
-    assert [s.by for s in owed(payload, ME)] == ["colleague"]
-    assert [(f.bot, f.state) for f in bot_findings(payload, ME)] == [
-        ("greptile-apps[bot]", BotState.OPEN_THREAD)]
-    assert kinds(payload) == [ReasonKind.REPLY, ReasonKind.BOTFIX]
+def test_bot_opened_thread_stays_open_through_replies_push_and_outdated():
+    opener = comment("greptile-apps[bot]", at(5), "Bug: this breaks x")
+    node = thread(opener, comment(ME, at(6), "fixed"))
+    payload = pr(reviewThreads={"nodes": [node]})
+
+    row = classify(payload, ME, NOW)
+    assert [(finding.state, finding.open) for finding in row.bot_findings] == [
+        (BotState.OPEN_THREAD, True),
+    ]
+
+    node["recent"]["nodes"] = [comment("colleague", at(7), "still broken")]
+    node["recent"]["totalCount"] = 3
+    row = classify(payload, ME, NOW)
+    assert [signal.by for signal in row.owed] == ["colleague"]
+    assert [(finding.state, finding.open) for finding in row.bot_findings] == [
+        (BotState.OPEN_THREAD, True),
+    ]
+    assert [reason.kind for reason in row.reasons] == [ReasonKind.REPLY, ReasonKind.BOTFIX]
+
+    payload["commits"] = commits(committed=at(8), rollup=False)
+    row = classify(payload, ME, NOW)
+    assert [(finding.state, finding.open) for finding in row.bot_findings] == [
+        (BotState.OPEN_THREAD, True),
+    ]
+
+    node["isOutdated"] = True
+    row = classify(payload, ME, NOW)
+    assert [(finding.state, finding.open, finding.outdated)
+            for finding in row.bot_findings] == [
+        (BotState.OPEN_THREAD, True, True),
+    ]
+
+    node["isResolved"] = True
+    assert classify(payload, ME, NOW).bot_findings == ()
 
 
 def test_bot_only_thread_owes_nothing():
@@ -168,11 +219,48 @@ def test_trailing_bot_over_an_unread_middle_is_partial_not_owed():
     assert classify(payload, ME, NOW).partial
 
 
+def test_an_empty_partial_thread_does_not_discard_other_signals():
+    payload = pr(
+        comments={"nodes": [comment("colleague", at(5), "real bug")]},
+        reviewThreads={"nodes": [thread(total=1)]},
+    )
+    assert [signal.by for signal in classify(payload, ME, NOW).owed] == ["colleague"]
+
+
 def test_my_reply_at_the_newest_end_closes_the_thread():
     payload = pr(reviewThreads={"nodes": [
         thread(comment("colleague", at(5), "q"), comment(ME, at(6), "done")),
     ]})
     assert owed(payload, ME) == ()
+
+
+def test_thread_comments_unions_deduplicates_and_orders_all_connections():
+    opener = comment("colleague", at(3), "ask", id="opener")
+    middle = comment(ME, at(5), "fixed", id="middle")
+    newest = comment("claude", at(7), "summary", id="newest")
+    node = thread(opener, newest, total=3)
+    node["activity"] = {"nodes": [newest, middle, opener]}
+    assert [item["id"] for item in thread_comments(node)] == ["opener", "middle", "newest"]
+
+
+def test_middle_viewer_reply_before_bot_answers_earlier_human():
+    opener = comment("colleague", at(3), "ask")
+    middle = comment(ME, at(5), "fixed")
+    newest = comment("claude", at(7), "summary")
+    node = thread(opener, newest, total=3)
+    node["activity"] = {"nodes": [opener, middle, newest]}
+    assert owed(pr(reviewThreads={"nodes": [node]}), ME) == ()
+
+
+def test_human_after_middle_viewer_reply_is_still_owed_before_bot():
+    opener = comment("colleague", at(3), "first ask")
+    mine = comment(ME, at(5), "fixed")
+    later = comment("other", at(6), "still broken")
+    newest = comment("claude", at(7), "summary")
+    node = thread(opener, newest, total=4)
+    node["activity"] = {"nodes": [later, opener, mine, newest]}
+    signals = owed(pr(reviewThreads={"nodes": [node]}), ME)
+    assert [(signal.by, signal.at.day) for signal in signals] == [("other", 6)]
 
 
 def test_deleted_author_is_owed_not_dropped():
@@ -226,6 +314,35 @@ def test_push_after_a_review_body_answers_it():
         review("them", "COMMENTED", body="please fix", at=at(1)),
     ]})
     assert owed(payload, ME) == ()
+
+
+def test_middle_thread_reply_answers_an_earlier_review_body():
+    opener = comment("colleague", at(3), "thread ask")
+    mine = comment(ME, at(4), "fixed")
+    newest = comment("claude", at(5), "summary")
+    node = thread(opener, newest, total=3)
+    node["activity"] = {"nodes": [opener, mine, newest]}
+    payload = pr(
+        reviewThreads={"nodes": [node]},
+        reviews={"nodes": [review("other", "COMMENTED", body="please fix", at=at(2))]},
+    )
+    assert owed(payload, ME) == ()
+
+
+def test_unread_thread_middle_only_hides_review_body_it_might_answer():
+    node = thread(comment("other", at(3), "thread ask"),
+                  comment("claude", at(7), "summary"), total=3)
+    node["_activity_complete"] = False
+    payload = pr(
+        _thread_activity_complete=False,
+        _partial=["thread activity incomplete"],
+        reviewThreads={"nodes": [node]},
+        reviews={"nodes": [review("other", "COMMENTED", body="earlier ask", at=at(5)),
+                           review("other", "COMMENTED", body="later ask", at=at(8))]},
+    )
+    row = classify(payload, ME, NOW)
+    assert [(signal.by, signal.at.day) for signal in row.owed] == [("other", 8)]
+    assert "thread activity incomplete" in row.partial
 
 
 def test_push_inside_the_commit_to_check_window_does_not_answer_an_earlier_review():
@@ -520,6 +637,15 @@ def test_blocking_summary_blocks_the_merge():
     assert kinds(payload) == [ReasonKind.BOTFIX]
 
 
+def test_pending_viewer_review_does_not_hide_bot_review_summary():
+    pending = review(ME, "PENDING", at=None)
+    summary = review("claude", "COMMENTED", body=BLOCKING_BODY, at=at(5))
+    row = classify(pr(reviews={"nodes": [pending, summary]}), ME, NOW)
+    assert [(finding.surface, finding.state) for finding in row.bot_findings] == [
+        (Surface.REVIEW, BotState.BLOCKING),
+    ]
+
+
 def test_clean_current_summary_is_dropped():
     payload = summary_pr(comment("claude", at(5), CLEAN_BODY))
     assert bot_findings(payload, ME) == ()
@@ -654,6 +780,14 @@ def test_viewer_review_state_survives_into_the_contract():
     assert row.viewer_review.state == "APPROVED"
     assert row.viewer_review.submitted_at < row.updated_at
     assert row.approved_by == ("colleague",)
+
+
+def test_pr_and_viewer_review_head_oids_are_mapped_independently():
+    mine = review(ME, "APPROVED", at=at(3))
+    mine["commit"] = {"oid": "reviewed-head"}
+    row = classify(pr(headRefOid="current-head", reviews={"nodes": [mine]}), ME, NOW)
+    assert row.head_oid == "current-head"
+    assert row.viewer_review.head_oid == "reviewed-head"
 
 
 def test_review_requests_carry_users_and_team_slugs():

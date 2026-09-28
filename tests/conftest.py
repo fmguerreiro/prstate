@@ -31,11 +31,14 @@ def pr(**overrides) -> dict:
     return payload
 
 
-def comment(who, at, body="x", minimized=False, reason=None, id=None) -> dict:
+def comment(who, at, body="x", minimized=False, reason=None, id=None,
+            actor_type="User") -> dict:
     """An issue comment or a review-thread comment; `who=None` is a deleted account."""
     return {
         "id": id or f"C{next(_ids)}",
-        "author": None if who is None else {"login": who},
+        "author": (
+            None if who is None else {"__typename": actor_type, "login": who}
+        ),
         "createdAt": at,
         "body": body,
         "isMinimized": minimized,
@@ -44,10 +47,12 @@ def comment(who, at, body="x", minimized=False, reason=None, id=None) -> dict:
 
 
 def review(who, state, body="", at="2026-01-03T00:00:00Z",
-           minimized=False, reason=None, id=None) -> dict:
+           minimized=False, reason=None, id=None, actor_type="User") -> dict:
     return {
         "id": id or f"R{next(_ids)}",
-        "author": None if who is None else {"login": who},
+        "author": (
+            None if who is None else {"__typename": actor_type, "login": who}
+        ),
         "state": state,
         "submittedAt": at,
         "body": body,

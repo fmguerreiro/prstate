@@ -4,7 +4,10 @@ which PRs survive the post-filters, and what the exit codes say."""
 from __future__ import annotations
 
 import json
+import subprocess
+from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -12,12 +15,16 @@ from prstate import cli, gh, render
 from prstate.model import (
     BotFinding,
     BotState,
+    Check,
     Ci,
     CiState,
     Owed,
     PullRequest,
+    Reason,
+    ReasonKind,
     Surface,
     Sweep,
+    ViewerReview,
 )
 
 NOW = datetime(2026, 9, 25, 8, 0, tzinfo=timezone.utc)
@@ -372,18 +379,18 @@ def test_reading_nothing_at_all_exits_one(stub, capsys):
     assert out == ""
 
 
-def test_a_gh_failure_is_one_stderr_line(stub, capsys, monkeypatch):
+def test_a_gh_failure_is_one_terminal_safe_stderr_line(stub, capsys, monkeypatch):
     stub(make_sweep())
 
     def boom(**kwargs):
-        raise gh.GhError("gh auth status failed")
+        raise gh.GhError("gh failed\nINJECTED\x1b[31mRED\u202e")
 
     monkeypatch.setattr(gh, "fetch", boom)
 
     code, out, err = run(capsys, ["--json"])
 
     assert code == 1
-    assert err.strip().splitlines() == ["prstate: gh auth status failed"]
+    assert err == "prstate: gh failedINJECTED[31mRED\n"
     assert out == ""
 
 
@@ -392,3 +399,216 @@ def test_the_parser_owns_scope_exclusivity(capsys):
         cli.build_parser().parse_args(["--repo", "o/n", "--all-orgs"])
 
     assert exit_.value.code == 2
+
+
+def test_json_public_contract_is_complete_and_round_trips():
+    populated = replace(
+        make_pr(1, owed=(make_owed(),), bot_findings=(make_finding(),)),
+        review_decision="REVIEW_REQUIRED",
+        viewer_review=ViewerReview(
+            state="APPROVED",
+            submitted_at=NOW,
+            head_oid="reviewedbeef",
+        ),
+        review_requested_from=("alice",),
+        approved_by=("bob",),
+        changes_requested_by=("carol",),
+        ci=Ci(
+            state=CiState.FAIL,
+            failed=("unit",),
+            pending=("lint",),
+            unknown=("deploy",),
+            checks=(
+                Check(
+                    name="unit",
+                    state="FAILURE",
+                    workflow="ci",
+                    run_id=42,
+                    at=NOW,
+                ),
+            ),
+        ),
+        partial=("comments unavailable",),
+        reasons=(Reason(kind=ReasonKind.BLOCKED, detail="review required"),),
+    )
+    payload = make_sweep(
+        populated,
+        make_pr(2),
+        partial=("one repository unavailable",),
+    ).to_dict(full=True)
+
+    assert set(payload) == {
+        "schema_version",
+        "fetched_at",
+        "scope",
+        "viewer",
+        "partial",
+        "prs",
+    }
+    pr_keys = {
+        "key",
+        "repo",
+        "number",
+        "title",
+        "url",
+        "author",
+        "draft",
+        "base",
+        "updated_at",
+        "mergeable",
+        "merge_state",
+        "review_decision",
+        "viewer_review",
+        "review_requested_from",
+        "head_oid",
+        "approved_by",
+        "changes_requested_by",
+        "ci",
+        "owed",
+        "bot_findings",
+        "partial",
+        "reasons",
+    }
+    full, minimal = payload["prs"]
+    assert set(full) == pr_keys
+    assert set(minimal) == pr_keys
+    assert set(full["ci"]) == {"state", "failed", "pending", "unknown", "checks"}
+    assert set(minimal["ci"]) == {"state", "failed", "pending", "unknown", "checks"}
+    assert set(full["ci"]["checks"][0]) == {
+        "name",
+        "state",
+        "workflow",
+        "run_id",
+        "at",
+    }
+    assert set(full["viewer_review"]) == {"state", "submitted_at", "head_oid"}
+    assert set(full["owed"][0]) == {
+        "surface",
+        "by",
+        "at",
+        "reason",
+        "thread_id",
+        "path",
+        "outdated",
+        "excerpt",
+        "body",
+    }
+    assert set(full["bot_findings"][0]) == {
+        "bot",
+        "surface",
+        "state",
+        "at",
+        "thread_id",
+        "path",
+        "resolved",
+        "outdated",
+        "minimized",
+        "minimized_reason",
+        "verdict",
+        "superseded_by",
+        "excerpt",
+        "body",
+        "open",
+    }
+    assert set(full["reasons"][0]) == {"kind", "detail"}
+
+    assert {state.value for state in CiState} == {
+        "pass",
+        "fail",
+        "pending",
+        "unknown",
+        "none",
+    }
+    assert {surface.value for surface in Surface} == {"thread", "review", "comment"}
+    assert {state.value for state in BotState} == {
+        "open_thread",
+        "blocking",
+        "stale",
+        "stale_clean",
+        "unknown",
+    }
+    assert {kind.value for kind in ReasonKind} == {
+        "blocked",
+        "reply",
+        "botfix",
+        "stale_verdict",
+        "merge",
+        "not_ready",
+        "conflict",
+        "ci",
+        "partial",
+        "running",
+    }
+    assert full["ci"]["state"] == "fail"
+    assert full["owed"][0]["surface"] == "thread"
+    assert full["bot_findings"][0]["state"] == "blocking"
+    assert full["reasons"][0]["kind"] == "blocked"
+
+    timestamp = "2026-09-25T08:00:00Z"
+    assert payload["fetched_at"] == timestamp
+    assert full["updated_at"] == timestamp
+    assert full["viewer_review"]["submitted_at"] == timestamp
+    assert full["ci"]["checks"][0]["at"] == timestamp
+    assert full["owed"][0]["at"] == timestamp
+    assert full["bot_findings"][0]["at"] == timestamp
+    assert json.loads(json.dumps(payload)) == payload
+
+
+def test_wheel_installs_package_and_documented_root_exports(tmp_path):
+    dist = tmp_path / "dist"
+    subprocess.run(
+        [
+            "uv",
+            "build",
+            "--offline",
+            "--wheel",
+            "--out-dir",
+            str(dist),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    wheel = next(dist.glob("*.whl"))
+
+
+    subprocess.run(
+        [
+            "uv",
+            "run",
+            "--isolated",
+            "--offline",
+            "--no-project",
+            "--with",
+            str(wheel),
+            "python",
+            "-I",
+            "-c",
+            """
+import importlib
+from prstate import (
+    BotFinding,
+    BotState,
+    Check,
+    Ci,
+    CiState,
+    Owed,
+    PullRequest,
+    ReasonKind,
+    Surface,
+    Sweep,
+    ViewerReview,
+    classify,
+    fetch,
+)
+
+for module in ("classify", "cli", "gh", "model", "query", "render"):
+    importlib.import_module(f"prstate.{module}")
+""",
+        ],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
