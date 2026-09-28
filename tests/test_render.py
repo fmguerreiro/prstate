@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from unicodedata import category
 
 from prstate.model import (
     BotFinding,
@@ -244,6 +245,27 @@ def test_an_incomplete_sweep_says_so_in_the_headline():
     assert "floor" not in complete
     assert "floor" in short.splitlines()[0]
     assert "search page 3 failed: HTTP 502" in short
+
+
+def test_rendered_lines_strip_terminal_controls_from_github_text():
+    malicious = (
+        "Normal café\nINJECTED\x1b[31mRED\x1b]0;pwned\x07"
+        "\u0085\u202eRTL\u2066"
+    )
+    pr = make_pr(
+        reasons=(reason(ReasonKind.REPLY, malicious),),
+        title=malicious,
+        owed=(make_owed(body=malicious),),
+    )
+    report = render(
+        make_sweep(pr, partial=(malicious,), scope=malicious), NOW, full=True
+    )
+
+    assert "Normal caféINJECTED[31mRED]0;pwnedRTL" in report
+    assert all(
+        char == "\n" or category(char) not in {"Cc", "Cf"} for char in report
+    )
+    assert "\nINJECTED" not in report
 
 
 def test_a_pr_whose_read_was_inconclusive_renders_its_caveat():

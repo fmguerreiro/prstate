@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime
+from unicodedata import category
 
 from prstate.model import (
     BotFinding,
@@ -43,6 +44,10 @@ TEXT_CHARS = 110
 MAX_OWED = 6
 MAX_BOTS = 4
 STALE_DRAFT_DAYS = 7
+
+
+def terminal_text(text: str) -> str:
+    return "".join(char for char in text if category(char) not in {"Cc", "Cf"})
 
 
 def buckets(prs: Sequence[PullRequest]) -> list[tuple[ReasonKind, list[PullRequest]]]:
@@ -175,4 +180,4 @@ def render(sweep: Sweep, now: datetime, *, full: bool = False) -> str:
             f"{pr.key} {_idle(now, pr.updated_at)}d" for pr in stale_drafts[:10]
         )
         out.append(f"{len(stale_drafts)} stale drafts (close or finish): {listed}")
-    return "\n".join(out)
+    return "\n".join(terminal_text(line) for line in out)

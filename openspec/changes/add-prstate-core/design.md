@@ -21,7 +21,10 @@ Discovery is `gh search prs`; detail is raw GraphQL. `gh search prs --json` lack
    one query. A `reviewThreads`-only read reports clean while a bot bug sits in an issue
    comment (komb#208). Thread ends are fetched as separate `opener: comments(first:1)`
    and `recent: comments(last:1)` connections with `totalCount`, because the tail of a
-   `first:N` page is comment N, not the newest, and who spoke last is the whole decision.
+   `first:N` page is comment N, not the newest. When the count exceeds the deduplicated
+   ends, the thread node's cursor fetches every comment: a viewer reply in the middle
+   changes whether the newest human signal is owed. Failure or a bounded page cap marks
+   the pull request partial instead of guessing.
 
 2. **Latest-per-check collapse**, keyed on `(workflow, check name)`. Within a workflow
    the higher `workflowRun.databaseId` wins; finish time cannot decide it, because
@@ -83,6 +86,7 @@ fixtures. `query.py` is separate from `gh.py` so the page-size constants are pro
 reachable in the emitted query text without a subprocess — hardcoding a page size twice
 is what previously let a smaller page silently stop a truncation check from firing.
 
-Read-only is enforced by a test, not a convention: an allowlist of `gh` subcommands
-(`search`, `api`, `auth`, `repo`) and a rejection of any `api` call whose query text
-contains `mutation`.
+Read-only is enforced by a test, not a convention. The command builder permits search,
+read-only GraphQL and user reads, repository owner lookup, and exactly `gh auth status`.
+It rejects GraphQL mutations, write HTTP flags, credential-changing auth commands, and
+token display. `gh.py` remains the only module allowed to import `subprocess`.

@@ -2,6 +2,7 @@
 name = "prstate"
 version = "0.1.0"
 description = "Normalized GitHub pull-request review state: CI verdict, what you owe humans, what bots still have open."
+readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
 

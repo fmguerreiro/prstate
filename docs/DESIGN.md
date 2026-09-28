@@ -224,6 +224,9 @@ do I owe" must not.
 
 ### (d) bot supersede
 
+An author is automated when GitHub reports the actor type as `Bot`, or when its login
+matches the fallback bot allowlist or `[bot]` suffix.
+
 Order of evidence, strongest first:
 
 1. **GitHub's own minimize state.** `isMinimized` / `minimizedReason` on IssueComment,
@@ -277,9 +280,12 @@ aliases keep the query readable and let one bad PR fail in isolation.
 **Truncation detection.** Page sizes are named constants interpolated into the query
 (`THREAD_PAGE = 100`, `COMMENT_PAGE = 50`, `REVIEW_PAGE = 50`), hardcoding them twice is
 what let a smaller page silently stop the truncation check firing (triage.py:44-47).
-Every connection that hits its page limit appends to `partial`. Rollup contexts page
-through `hasNextPage`; the other three declare partial rather than paginate, matching
-triage.py, because a PR with >100 threads is pathological and the flag is honest.
+Rollup contexts follow `pageInfo.hasNextPage`. A thread whose `totalCount` exceeds its
+deduplicated opener and newest comment follows the thread node's comment cursor, because
+a viewer reply in the middle changes whether a human signal is owed. Either continuation
+stops at a bounded page count and appends to `partial` if GitHub cannot complete it.
+The top-level thread, issue-comment, and review connections still declare partial when
+they hit their page limits.
 
 **Rate limit.** One retry with backoff on secondary-rate-limit and 502/503, then give up
 and mark the affected PRs partial rather than half-report. GraphQL cost per batch is

@@ -165,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         sweep = _sweep(args)
     except gh.GhError as err:
-        print(f"prstate: {err}", file=sys.stderr)
+        print(f"prstate: {render.terminal_text(str(err))}", file=sys.stderr)
         return 1
 
     # A sweep that found PRs and read none of them is not a thin result, it is no

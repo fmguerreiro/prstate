@@ -178,6 +178,12 @@ viewer comment in that thread.
 - **WHEN** every comment in an unresolved thread was written by an automated reviewer
 - **THEN** nothing is owed on that thread as a human signal
 
+#### Scenario: GitHub's actor type identifies bots without a bot-shaped login
+
+- **WHEN** GitHub reports a comment author as actor type `Bot` even though its login has
+  no known bot suffix or allowlist entry
+- **THEN** the author is treated as an automated reviewer
+
 #### Scenario: A resolved thread owes nothing
 
 - **WHEN** a review thread is marked resolved
@@ -309,16 +315,24 @@ request with a non-empty incompleteness list SHALL NOT be recommended for merge.
 - **THEN** every context is read and the pull request carries no rollup incompleteness
   reason
 
-#### Scenario: A long but fully read thread is not incomplete
+#### Scenario: Every comment in a long thread is read
 
-- **WHEN** a review thread has many comments and both its oldest and newest comments were
-  read
-- **THEN** the pull request carries no incompleteness reason for that thread
+- **WHEN** a review thread has more comments than the two end reads reveal and every
+  continuation page is available
+- **THEN** the system reads every thread comment and carries no incompleteness reason
+  for that thread
+
+#### Scenario: A viewer reply in the middle answers the earlier human signal
+
+- **WHEN** a human opens a thread, the viewer replies, and an automated reviewer posts
+  the newest comment
+- **AND** every thread-comment page is available
+- **THEN** the earlier human signal is not reported as owed
 
 #### Scenario: An unread thread middle blocks a verdict instead of guessing one
 
-- **WHEN** an unresolved thread's newest comment is from an automated reviewer and the
-  comments between the two read ends were not fetched
+- **WHEN** an unresolved thread's newest comment is from an automated reviewer
+- **AND** a continuation page fails or exceeds the bounded page count
 - **THEN** nothing is reported as owed for that thread
 - **AND** the pull request carries an incompleteness reason naming it
 

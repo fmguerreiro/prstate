@@ -10,8 +10,10 @@ import pathlib
 import types
 
 import pytest
+from conftest import approved_pr, check, commits
 
 from prstate import gh, query
+from prstate.model import CiState
 
 
 class Proc:
@@ -42,8 +44,15 @@ def graphql_reply(data, returncode=0, stderr=""):
 @pytest.mark.parametrize("parts", [
     ("pr", "merge", "1"),
     ("pr", "view", "1"),
+    ("auth", "login"),
+    ("auth", "logout"),
+    ("auth", "refresh"),
+    ("auth", "status", "--show-token"),
+    ("auth", "status", "-t"),
     ("repo", "delete", "o/n"),
     ("api", "graphql", "-X", "POST", "-f", "query=query {x}"),
+    ("api", "graphql", "-XPATCH", "-f", "query=query {x}"),
+    ("api", "graphql", "-Fname=value"),
     ("api", "repos/o/n", "-X", "DELETE"),
     ("api", "repos/o/n/merges", "--method=POST"),
     ("api", "graphql", "-f", "query=mutation { addComment(input: {}) { clientMutationId } }"),
@@ -328,6 +337,31 @@ def stub_fetch(monkeypatch, aliases):
     return stub_gh(monkeypatch, handler), seen
 
 
+def test_fetch_classifies_a_failure_from_the_second_rollup_page(monkeypatch):
+    first_page = [
+        check("ci", "SUCCESS", run=1, completed="2026-01-02T01:00:00Z"),
+        *(check(f"green-{idx}", "SUCCESS", run=idx + 2)
+          for idx in range(query.ROLLUP_PAGE - 1)),
+    ]
+    node = approved_pr(number=7, commits=commits(*first_page, total=101))
+    contexts = node["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]
+    contexts["pageInfo"] = {"hasNextPage": True, "endCursor": "PAGE-2"}
+    replies = iter([
+        Proc(),
+        Proc(stdout="alice\n"),
+        graphql_reply({"p0": {"pullRequest": node}}),
+        graphql_reply(rollup_page([
+            check("ci", "FAILURE", run=101, completed="2026-01-02T02:00:00Z"),
+        ], False)),
+    ])
+    stub_gh(monkeypatch, lambda cmd: next(replies))
+
+    sweep = gh.fetch(repo="o/n", refs=[("o/n", 7)])
+
+    assert sweep.prs[0].ci.state is CiState.FAIL
+    assert sweep.prs[0].ci.failed == ("ci",)
+
+
 def test_fetch_with_refs_skips_discovery(monkeypatch):
     # B3: --pr N names a PR discovery never ran for, and still reads it in full.
     def no_discovery(**kwargs):
@@ -356,6 +390,153 @@ def test_fetch_of_nothing_is_an_empty_sweep_not_an_error(monkeypatch):
     sweep = gh.fetch(owner="acme")
     assert sweep.prs == () and sweep.partial == ()
     assert sweep.scope == "owner acme"
+
+
+def thread_comment(login, at, body="hi"):
+    return {"id": f"C_{login}_{at}", "author": {"login": login}, "createdAt": at,
+            "body": body, "isMinimized": False, "minimizedReason": None}
+
+
+def thread_node(*, total, ends, thread_id="PRRT_1", number=7):
+    thread = {"isResolved": False, "isOutdated": False, "path": "a.py",
+              "opener": {"nodes": [ends[0]]},
+              "recent": {"totalCount": total, "nodes": [ends[-1]]}}
+    if thread_id is not None:
+        thread["id"] = thread_id
+    return {"_repo": "o/n", "_partial": [], "number": number,
+            "reviewThreads": {"nodes": [thread]}}
+
+
+def thread_page(nodes, has_next, cursor="NEXT"):
+    return {"t0": {"comments": {"totalCount": len(nodes), "nodes": list(nodes),
+                                "pageInfo": {"hasNextPage": has_next,
+                                             "endCursor": cursor}}}}
+
+
+def stub_fetch_pages(monkeypatch, node, *replies):
+    """gh auth status, gh api user, the PR query carrying `node`, then `replies`."""
+    scripted = iter([Proc(), Proc(stdout="alice\n"),
+                     graphql_reply({"p0": {"pullRequest": node}}), *replies])
+    seen: list[dict] = []
+    monkeypatch.setattr(gh, "_classify_pr",
+                        lambda node, viewer, now: seen.append(node) or node)
+    return stub_gh(monkeypatch, lambda cmd: next(scripted)), seen
+
+
+def test_fetch_reads_the_middle_of_a_long_thread(monkeypatch):
+    opener = thread_comment("bob", "2026-01-01T00:00:00Z", "please fix")
+    middle = thread_comment("alice", "2026-01-02T00:00:00Z", "fixed in abc123")
+    newest = thread_comment("bob", "2026-01-03T00:00:00Z", "ping")
+    node = thread_node(total=3, ends=[opener, newest])
+    calls, seen = stub_fetch_pages(monkeypatch, node,
+                                   graphql_reply(thread_page([opener, middle, newest], False)))
+
+    gh.fetch(repo="o/n", refs=[("o/n", 7)])
+
+    thread = seen[0]["reviewThreads"]["nodes"][0]
+    assert [c["createdAt"] for c in thread["activity"]["nodes"]] == [
+        "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z", "2026-01-03T00:00:00Z"]
+    assert seen[0]["_thread_activity_complete"] is True
+    assert seen[0]["_partial"] == []
+    assert len(calls) == 4
+
+
+def test_fetch_marks_the_pr_partial_when_a_thread_page_cannot_be_read(monkeypatch):
+    node = thread_node(total=9, ends=[thread_comment("bob", "2026-01-01T00:00:00Z"),
+                                      thread_comment("bob", "2026-01-03T00:00:00Z")])
+    calls, seen = stub_fetch_pages(monkeypatch, node, graphql_reply({"t0": None}))
+
+    gh.fetch(repo="o/n", refs=[("o/n", 7)])
+
+    assert seen[0]["_thread_activity_complete"] is False
+    assert seen[0]["_partial"] == ["the comments of a thread on a.py could not be read"]
+    assert len(calls) == 4
+
+
+def test_fetch_leaves_a_thread_its_two_ends_already_cover_alone(monkeypatch):
+    node = thread_node(total=2, ends=[thread_comment("bob", "2026-01-01T00:00:00Z"),
+                                      thread_comment("alice", "2026-01-02T00:00:00Z")])
+    calls, seen = stub_fetch_pages(monkeypatch, node)
+
+    gh.fetch(repo="o/n", refs=[("o/n", 7)])
+
+    assert len(calls) == 3
+    assert "activity" not in seen[0]["reviewThreads"]["nodes"][0]
+    assert seen[0]["_thread_activity_complete"] is True
+
+
+def test_a_one_comment_thread_is_not_paged_for_its_own_opener(monkeypatch):
+    only = thread_comment("bob", "2026-01-01T00:00:00Z")
+    node = thread_node(total=1, ends=[only, only])
+    calls, _seen = stub_fetch_pages(monkeypatch, node)
+    gh.fetch(repo="o/n", refs=[("o/n", 7)])
+    assert len(calls) == 3
+
+
+def test_paginate_thread_activity_follows_the_threads_own_cursor(monkeypatch):
+    node = thread_node(total=250, ends=[thread_comment("bob", "2026-01-01T00:00:00Z"),
+                                        thread_comment("bob", "2026-01-09T00:00:00Z")])
+    pages = iter([thread_page([thread_comment("bob", "2026-01-02T00:00:00Z")], True,
+                              cursor="PAGE-2"),
+                  thread_page([thread_comment("alice", "2026-01-03T00:00:00Z")], False)])
+    sent: list[str] = []
+
+    def handler(cmd):
+        sent.append(cmd[-1])
+        return graphql_reply(next(pages))
+
+    stub_gh(monkeypatch, handler)
+    gh._paginate_thread_activity({"o/n#7": node})
+    assert "after: null" in sent[0]
+    assert 'after: "PAGE-2"' in sent[1]
+    activity = node["reviewThreads"]["nodes"][0]["activity"]
+    assert [c["createdAt"] for c in activity["nodes"]] == ["2026-01-02T00:00:00Z",
+                                                           "2026-01-03T00:00:00Z"]
+    assert node["_thread_activity_complete"] is True
+
+
+def test_paginate_thread_activity_stops_at_the_page_cap(monkeypatch):
+    node = thread_node(total=5000, ends=[thread_comment("bob", "2026-01-01T00:00:00Z"),
+                                         thread_comment("bob", "2026-02-01T00:00:00Z")])
+    calls = stub_gh(monkeypatch, lambda cmd: graphql_reply(
+        thread_page([thread_comment("bob", "2026-01-02T00:00:00Z")], True)))
+    gh._paginate_thread_activity({"o/n#7": node})
+    assert len(calls) == query.MAX_THREAD_PAGES
+    assert node["_thread_activity_complete"] is False
+    assert node["_partial"] == [
+        "the comments of a thread on a.py ran to more pages than prstate read"]
+
+
+def test_paginate_thread_activity_does_not_reask_a_page_that_names_no_cursor(monkeypatch):
+    node = thread_node(total=400, ends=[thread_comment("bob", "2026-01-01T00:00:00Z"),
+                                        thread_comment("bob", "2026-02-01T00:00:00Z")])
+    calls = stub_gh(monkeypatch, lambda cmd: graphql_reply(
+        thread_page([thread_comment("bob", "2026-01-02T00:00:00Z")], True, cursor=None)))
+    gh._paginate_thread_activity({"o/n#7": node})
+    assert len(calls) == 1
+    assert node["_thread_activity_complete"] is False
+
+
+def test_a_thread_without_an_id_is_reported_not_queried(monkeypatch):
+    node = thread_node(total=9, ends=[thread_comment("bob", "2026-01-01T00:00:00Z"),
+                                      thread_comment("bob", "2026-02-01T00:00:00Z")],
+                       thread_id=None)
+    calls = stub_gh(monkeypatch, lambda cmd: graphql_reply({}))
+    gh._paginate_thread_activity({"o/n#7": node})
+    assert calls == []
+    assert node["_thread_activity_complete"] is False
+    assert node["_partial"] == ["the comments of a thread on a.py have no thread id to page from"]
+
+
+def test_paginate_thread_activity_trims_the_bodies_it_pages_in(monkeypatch):
+    long = "x" * (query.BODY_CHARS + 500)
+    node = thread_node(total=3, ends=[thread_comment("bob", "2026-01-01T00:00:00Z"),
+                                      thread_comment("bob", "2026-02-01T00:00:00Z")])
+    stub_gh(monkeypatch, lambda cmd: graphql_reply(thread_page(
+        [thread_comment("alice", "2026-01-15T00:00:00Z", body=long)], False)))
+    gh._paginate_thread_activity({"o/n#7": node})
+    paged = node["reviewThreads"]["nodes"][0]["activity"]["nodes"][0]
+    assert len(paged["body"]) == query.BODY_CHARS
 
 
 def imported_modules(tree: ast.AST) -> set[str]:

@@ -16,8 +16,10 @@ THREAD_PAGE = 100
 COMMENT_PAGE = 50
 REVIEW_PAGE = 50
 ROLLUP_PAGE = 100
+THREAD_COMMENT_PAGE = 100
 # Give up and mark the PR partial rather than page forever.
 MAX_ROLLUP_PAGES = 10
+MAX_THREAD_PAGES = 10
 BODY_CHARS = 1500
 EXCERPT_CHARS = 200
 
@@ -29,6 +31,10 @@ CONTEXT_NODES = """__typename
             ... on CheckRun { name conclusion status startedAt completedAt
               checkSuite { workflowRun { databaseId workflow { name } } } }
             ... on StatusContext { context state createdAt }"""
+
+# Every comment surface selects the same fields, so a thread read on the second
+# page carries what a thread read on the first one does.
+COMMENT_NODES = "id author { __typename login } createdAt body isMinimized minimizedReason"
 
 # pushedDate stays absent: GitHub returns null for it on every commit, so selecting
 # it invites trusting a field that never arrives.
@@ -54,17 +60,14 @@ PR_FRAGMENT = """
         } }
       } } }
       reviews(last: %(review_page)d) { nodes {
-        id author { login } state submittedAt body isMinimized minimizedReason
+        id author { __typename login } state submittedAt body isMinimized minimizedReason
         commit { oid } } }
       reviewThreads(first: %(thread_page)d) { nodes {
         id isResolved isOutdated path
-        opener: comments(first: 1) { nodes {
-          id author { login } createdAt body isMinimized minimizedReason } }
-        recent: comments(last: 1) { totalCount nodes {
-          id author { login } createdAt body isMinimized minimizedReason } }
+        opener: comments(first: 1) { nodes { %(comment_nodes)s } }
+        recent: comments(last: 1) { totalCount nodes { %(comment_nodes)s } }
       } }
-      comments(last: %(comment_page)d) { nodes {
-        id author { login } createdAt body isMinimized minimizedReason } }
+      comments(last: %(comment_page)d) { nodes { %(comment_nodes)s } }
     }
   }
 """
@@ -86,6 +89,22 @@ ROLLUP_FRAGMENT = """
 MERGE_FRAGMENT = """
   m%(idx)d: repository(owner: %(owner)s, name: %(name)s) {
     pullRequest(number: %(number)d) { mergeable mergeStateStatus }
+  }
+"""
+
+# The thread's global node id, not its PR: a thread that outran its first page is
+# addressable on its own, so the continuation never refetches the PR around it.
+THREAD_FRAGMENT = """
+  t%(idx)d: node(id: %(thread_id)s) {
+    ... on PullRequestReviewThread {
+      comments(first: %(thread_comment_page)d, after: %(cursor)s) {
+        totalCount
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          %(comment_nodes)s
+        }
+      }
+    }
   }
 """
 
@@ -111,6 +130,7 @@ def _vars(idx: int, repo: str, number: int) -> dict:
         "review_page": REVIEW_PAGE,
         "rollup_page": ROLLUP_PAGE,
         "context_nodes": CONTEXT_NODES,
+        "comment_nodes": COMMENT_NODES,
     }
 
 
@@ -140,3 +160,14 @@ def merge_query(refs: Sequence[tuple[str, int]]) -> str:
         raise ValueError("merge_query needs at least one pull request")
     return _wrap([MERGE_FRAGMENT % _vars(idx, repo, number)
                   for idx, (repo, number) in enumerate(refs)])
+
+
+def thread_query(cursors: Sequence[tuple[str, str | None]]) -> str:
+    if not cursors:
+        raise ValueError("thread_query needs at least one thread")
+    return _wrap([THREAD_FRAGMENT % {"idx": idx,
+                                     "thread_id": json.dumps(thread_id),
+                                     "cursor": json.dumps(cursor),
+                                     "thread_comment_page": THREAD_COMMENT_PAGE,
+                                     "comment_nodes": COMMENT_NODES}
+                  for idx, (thread_id, cursor) in enumerate(cursors)])
