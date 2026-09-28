@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from prstate.model import (
     DELETED,
@@ -54,7 +54,8 @@ CLEAN_PHRASE_RE = re.compile(r"\bno blocking findings\b|\bnothing (?:is |was )?b
                              re.IGNORECASE)
 BUG_LINE_RE = re.compile(r"^\s*(?:bug|issue)\s*:", re.IGNORECASE | re.MULTILINE)
 
-_ORDER_FLOOR = datetime.min.replace(tzinfo=timezone.utc)
+_ORDER_FLOOR = datetime.min.replace(tzinfo=UTC)
+_ORDER_CEILING = datetime.max.replace(tzinfo=UTC)
 
 THREAD_REASON = "unresolved thread, last human word is theirs"
 COMMENT_REASON = "issue comment with no later reply from you"
@@ -333,6 +334,22 @@ def viewer_activity_times(pr: dict, viewer: str) -> list[datetime]:
     return [t for t in times if t]
 
 
+def _thread_gap_until(pr: dict) -> datetime | None:
+    """Latest time an unread thread comment may have answered a review body."""
+    if pr.get("_thread_activity_complete") is not False:
+        return None
+    bounds = []
+    for thread in pr["reviewThreads"]["nodes"] or []:
+        if thread.get("_activity_complete") is not False:
+            continue
+        last = thread_last(thread)
+        newest = parse_time(last.get("createdAt")) if last else None
+        if newest is None:
+            return _ORDER_CEILING
+        bounds.append(newest)
+    return max(bounds, default=_ORDER_CEILING)
+
+
 def owed(pr: dict, viewer: str) -> tuple[Owed, ...]:
     """Human review signals with no later response from the viewer.
 
@@ -347,6 +364,7 @@ def owed(pr: dict, viewer: str) -> tuple[Owed, ...]:
     """
     signals: list[Owed] = []
     mine = viewer_activity_times(pr, viewer)
+    gap_until = _thread_gap_until(pr)
     my_comment_times = [
         parse_time(c["createdAt"]) for c in (pr["comments"]["nodes"] or [])
         if login_of(c) == viewer
@@ -366,10 +384,10 @@ def owed(pr: dict, viewer: str) -> tuple[Owed, ...]:
         human = None
         for candidate in reversed(comments):
             who = login_of(candidate)
-            if author_is_bot(candidate) or _minimized(candidate):
-                continue
             if who == viewer:
                 break
+            if author_is_bot(candidate) or _minimized(candidate):
+                continue
             human = candidate
             break
         if not human:
@@ -408,8 +426,6 @@ def owed(pr: dict, viewer: str) -> tuple[Owed, ...]:
         ))
 
     for review in pr["reviews"]["nodes"] or []:
-        if pr.get("_thread_activity_complete") is False:
-            continue
         author = login_of(review)
         if author == viewer or author_is_bot(review) or _minimized(review):
             continue
@@ -419,6 +435,8 @@ def owed(pr: dict, viewer: str) -> tuple[Owed, ...]:
         if not body:
             continue
         when = parse_time(review["submittedAt"])
+        if gap_until is not None and when < gap_until:
+            continue
         if any(t > when for t in mine):
             continue
         signals.append(Owed(

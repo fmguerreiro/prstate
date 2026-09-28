@@ -117,6 +117,14 @@ def test_thread_where_i_spoke_last_is_not_owed():
     assert owed(payload, ME) == ()
 
 
+def test_minimized_viewer_reply_still_answers_thread():
+    payload = pr(reviewThreads={"nodes": [
+        thread(comment("them", at(5), "q"),
+               comment(ME, at(6), "a", minimized=True, reason="OFF_TOPIC")),
+    ]})
+    assert owed(payload, ME) == ()
+
+
 def test_unresolved_thread_with_their_last_word_is_owed():
     payload = pr(reviewThreads={"nodes": [thread(comment("them", at(5), "q"))]})
     assert [(s.by, s.surface) for s in owed(payload, ME)] == [("them", Surface.THREAD)]
@@ -321,15 +329,20 @@ def test_middle_thread_reply_answers_an_earlier_review_body():
     assert owed(payload, ME) == ()
 
 
-def test_incomplete_thread_activity_suppresses_review_body_owed():
+def test_unread_thread_middle_only_hides_review_body_it_might_answer():
+    node = thread(comment("other", at(3), "thread ask"),
+                  comment("claude", at(7), "summary"), total=3)
+    node["_activity_complete"] = False
     payload = pr(
         _thread_activity_complete=False,
         _partial=["thread activity incomplete"],
-        reviews={"nodes": [review("other", "COMMENTED", body="please fix", at=at(5))]},
+        reviewThreads={"nodes": [node]},
+        reviews={"nodes": [review("other", "COMMENTED", body="earlier ask", at=at(5)),
+                           review("other", "COMMENTED", body="later ask", at=at(8))]},
     )
     row = classify(payload, ME, NOW)
-    assert row.owed == ()
-    assert row.partial == ("thread activity incomplete",)
+    assert [(signal.by, signal.at.day) for signal in row.owed] == [("other", 8)]
+    assert "thread activity incomplete" in row.partial
 
 
 def test_push_inside_the_commit_to_check_window_does_not_answer_an_earlier_review():

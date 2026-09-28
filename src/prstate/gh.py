@@ -358,6 +358,7 @@ def _stop_thread(thread: dict) -> None:
 
 def _thread_gap(node: dict, thread: dict, what: str) -> None:
     node["_thread_activity_complete"] = False
+    thread["_activity_complete"] = False
     reason = f"the comments of a thread on {thread.get('path')} {what}"
     if reason not in node["_partial"]:
         node["_partial"].append(reason)
