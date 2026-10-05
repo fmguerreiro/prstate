@@ -81,7 +81,7 @@ def make_pr(
         number=number,
         title=kw.get("title", "Add the thing"),
         url=f"https://github.com/acme/widgets/pull/{number}",
-        author=kw.get("author", "fmguerreiro"),
+        author=kw.get("author", "viewer"),
         draft=kw.get("draft", False),
         base=kw.get("base", "main"),
         updated_at=days_ago(idle),
@@ -106,7 +106,7 @@ def make_sweep(
 ) -> Sweep:
     return Sweep(
         scope=scope,
-        viewer="fmguerreiro",
+        viewer="viewer",
         fetched_at=NOW,
         prs=prs,
         partial=partial,
@@ -233,8 +233,8 @@ def test_an_open_thread_finding_is_labelled_by_its_path():
 
 
 def test_scope_appears_in_the_report_headline():
-    report = render(make_sweep(make_pr(), scope="owner sakana"), NOW)
-    assert "owner sakana" in report.splitlines()[0]
+    report = render(make_sweep(make_pr(), scope="owner acme"), NOW)
+    assert "owner acme" in report.splitlines()[0]
 
 
 def test_an_incomplete_sweep_says_so_in_the_headline():

@@ -1,7 +1,7 @@
 # Tasks — add-prstate-core
 
-Derived from `~/work/prstate-design/PLAN.md` work units 1.1-1.8 and its gated phases,
-with the four review blockers (B1-B4, see `design.md`) folded into the units they touch.
+Derived from pre-implementation work units 1.1-1.8 and gated phases, with the four
+review blockers (B1-B4, see `design.md`) folded into the units they touch.
 
 Each phase has a verification gate. No phase starts before the previous one is green.
 
@@ -44,7 +44,7 @@ Five units, one agent each, no shared files. Each owns its own test file.
 
 - [x] 3.1 `__init__.py` export surface: `fetch`, `classify`, `Sweep`, `PullRequest`,
       `Ci`, `Check`, `Owed`, `BotFinding`, `ViewerReview`, the enums.
-- [x] 3.2 Fixture migration from `test_triage.py`, each fixture named for the rule it
+- [x] 3.2 Fixture migration from recorded test cases, each fixture named for the rule it
       pins, not the PR it came from.
 - [x] 3.3 Read-only AST guard scanning the whole `src/prstate/` tree.
 
@@ -55,8 +55,7 @@ Five units, one agent each, no shared files. Each owns its own test file.
 
 - [x] 4.1 Shape checks against real PRs: `prstate --json`, `--owed`,
       `--review-requested`, `--pr N`.
-- [x] 4.2 Differential against the original: `python3
-      ~/.agents/skills/babysit-all-prs/triage.py --json` on the same scope. The ported
+- [x] 4.2 Differential against the prior classifier on the same scope. The ported
       classifier must agree except on the six changes the plan declares deliberate, plus
       B1's authorship gate. Every disagreement is adjudicated and recorded before the
       next phase.
@@ -65,21 +64,18 @@ Five units, one agent each, no shared files. Each owns its own test file.
 
 **Gate:** no unexplained differential; reviewer sweep returns a triageable answer.
 
-## 5. Skill cutover — gated on phase 4
+## 5. Consumer cutover — gated on phase 4
 
-Edits `/Users/filipeguerreiro/projects/dotfiles`, a different repo. A half-migrated
-skill is a broken skill the user runs daily, so this phase starts only after phase 4 is
-green, and each skill is cut over and verified one at a time.
+Consumer migration starts only after phase 4 is green, and each consumer is cut over and
+verified one at a time.
 
-- [x] 5.1 `babysit-all-prs` — `triage.py` and `test_triage.py` deleted, SKILL.md points
-      at `prstate`.
-- [x] 5.2 `reviews-needed` — phases 1 and 3 replaced by `prstate --review-requested
-      --json`; bucketing and rendering prose stays.
-- [x] 5.3 `babysit-reviews` — both discovery searches and the enrich phase replaced.
-- [x] 5.4 `pr-comment-surfaces` — the GraphQL and jq blocks become documentation of
-      `prstate --pr`, not instructions to re-derive it.
-- [x] 5.5 `review-swarm`, `pr-review-fanout`, `standup` — discovery and thread
-      enumeration replaced; every mutation stays in the skill, since prstate never writes.
+- [x] 5.1 Replace duplicated pull-request state collection with `prstate --json`.
+- [x] 5.2 Replace review-requested discovery with `prstate --review-requested --json`;
+      consumer-specific bucketing and rendering remains.
+- [x] 5.3 Replace reviewer-specific discovery and enrichment with `prstate`.
+- [x] 5.4 Replace GraphQL and jq instructions with `prstate --pr` documentation.
+- [x] 5.5 Replace shared discovery and thread enumeration; mutations remain with each
+      consumer because prstate never writes.
 
-**Gate:** each migrated skill run once end to end against a live repo before the next is
-touched.
+**Gate:** each migrated consumer runs once end to end against a live repo before the next
+is touched.

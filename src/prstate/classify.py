@@ -134,22 +134,7 @@ def _minimized(node: dict) -> bool:
 
 
 def latest_per_check(nodes: list[dict]) -> list[Check]:
-    """Collapse a rollup to the current state of each check.
-
-    Two separate problems, and conflating them is what produces a false verdict.
-
-    Supersession is per workflow. GitHub keeps every run of a workflow on the
-    commit, so a check that failed and was re-run green appears twice. Within one
-    workflow the higher run id is the later run and wins. Finish time cannot
-    decide it: concurrent runs interleave their jobs, and on komb-enterprise#530
-    the newer run's `lint` finished ten seconds before the older run's.
-
-    Collision is across workflows, and is not this function's job to resolve. Run
-    ids are monotonic per repo, not per workflow, so a higher id from a different
-    workflow proves only "started later", never "supersedes". Two workflows can
-    each define a job called `test`, both current, neither replacing the other, so
-    both survive here and ci_state sees them separately.
-    """
+    """Collapse runs per workflow and check using run order, not finish time."""
     newest: dict[tuple[str, str], tuple[int, datetime, Check]] = {}
     for index, node in enumerate(nodes):
         if node.get("__typename") == "CheckRun":
@@ -323,12 +308,7 @@ def viewer_activity_times(pr: dict, viewer: str) -> list[datetime]:
         for comment in thread_comments(thread):
             if login_of(comment) == viewer:
                 times.append(parse_time(comment["createdAt"]))
-    # The push is the AUTHOR's activity, not the viewer's. triage.py appended it
-    # unconditionally, which was only safe because discovery was --author=@me, so
-    # viewer was always the author. On a reviewer sweep an unconditional append
-    # lets the author's push discharge a third party's review body. Compare
-    # against the PR author, never the commit's author: pushing someone else's
-    # commits is still the PR author acting.
+    # Only the PR author's push counts as their activity, regardless of commit author.
     if viewer == login_of(pr):
         times.append(head_landed_at(pr))
     return [t for t in times if t]
@@ -509,11 +489,7 @@ def _summary_state(verdict: int | None, stale: bool) -> BotState | None:
         # Never known either way; staleness adds no information.
         return BotState.UNKNOWN
     if stale:
-        # The bot has not re-reviewed the current head, so its verdict cannot be
-        # trusted. A blocking verdict remains a real, unconfirmed finding; a clean
-        # verdict has no finding, so it uses a distinct state — reusing `stale`
-        # pulled six clean PRs into the actionable bucket and knocked #711 out of
-        # the merge bucket (2026-08-24).
+        # A stale clean verdict needs re-review, not an actionable bot fix.
         return BotState.STALE if verdict > 0 else BotState.STALE_CLEAN
     if verdict == 0:
         return None
@@ -521,16 +497,7 @@ def _summary_state(verdict: int | None, stale: bool) -> BotState | None:
 
 
 def bot_findings(pr: dict, viewer: str) -> tuple[BotFinding, ...]:
-    """Unresolved bot-opened threads and outstanding PR-level bot summaries.
-
-    One list, where triage.py kept two: they differ by state and surface, not by
-    kind, and every consumer concatenated them anyway.
-
-    Thread ownership follows the opener. A later human reply is evidence to
-    inspect, not closure, and a push is not closure either: a bot-opened thread
-    stays here until the automated reviewer resolves it (komb-enterprise#654,
-    #655, #656, 2026-08-22).
-    """
+    """Collect bot threads and summaries; replies and pushes do not resolve threads."""
     findings: list[BotFinding] = []
     for thread in pr["reviewThreads"]["nodes"] or []:
         if thread["isResolved"]:

@@ -36,6 +36,92 @@ prstate --review-requested    # PRs waiting on your review
 prstate --all-orgs --json     # every owner, machine-readable
 ```
 
+Example output below uses made-up PRs. Human-readable grouping may change; use
+`--json` for the stable fields.
+
+Default sweep (`prstate`):
+
+```text
+4 of 6 open PRs in owner acme need you.
+
+== Waiting on your reply (1) ==
+  acme/api#418  Add idempotency keys to payment retries
+    ci=pass mergeable=MERGEABLE/CLEAN review=REVIEW_REQUIRED base=main idle=2d
+    - 1 unanswered from maria
+      > maria on payments/retry.py, 1d ago: Should this key include the merchant id?
+
+== Unresolved bot findings (blocks the merge until current re-review clears them) (1) ==
+  acme/web#92  Move billing settings to the new form
+    ci=pass mergeable=MERGEABLE/CLEAN review=REVIEW_REQUIRED base=main idle=1d
+    - 1 unresolved bot finding(s) from coderabbitai — fix valid findings in code and obtain a current re-review
+      ~ coderabbitai (review), 0d ago, 2 blocking: Actionable comments posted: 2. Validate the retry limit before scheduling.
+
+== Approved, green, GitHub will take the merge (1) ==
+  acme/web#95  Fix timezone label on invoices
+    ci=pass mergeable=MERGEABLE/CLEAN review=APPROVED base=main idle=0d
+    - approved by lee
+
+== CI red (1) ==
+  acme/api#421  Upgrade database driver
+    ci=fail mergeable=MERGEABLE/CLEAN review=APPROVED base=main idle=0d
+    - failing: test-integration
+      checks: test-integration
+
+2 PRs need nothing (waiting on reviewers or already answered). Every PR whose read was inconclusive is flagged above, not counted here.
+```
+
+Waiting on your reply (`prstate --owed`):
+
+```text
+1 of 1 open PRs in owner acme need you.
+
+== Waiting on your reply (1) ==
+  acme/api#418  Add idempotency keys to payment retries
+    ci=pass mergeable=MERGEABLE/CLEAN review=REVIEW_REQUIRED base=main idle=2d
+    - 1 unanswered from maria
+      > maria on payments/retry.py, 1d ago: Should this key include the merchant id?
+
+0 PRs need nothing (waiting on reviewers or already answered). Every PR whose read was inconclusive is flagged above, not counted here.
+```
+
+Review requested (`prstate --review-requested`):
+
+```text
+1 of 3 open PRs in owner acme need you.
+
+== Checks still running (1) ==
+  acme/web#97  Cache dashboard summaries
+    ci=pending mergeable=MERGEABLE/CLEAN review=REVIEW_REQUIRED base=main idle=0d
+    - 1 check(s) still running
+
+2 PRs need nothing (waiting on reviewers or already answered). Every PR whose read was inconclusive is flagged above, not counted here.
+```
+
+This filter selects PRs requesting your review, but the text report groups only PRs
+with classified action reasons. For every selected PR, including unflagged ones, use
+`prstate --review-requested --json`.
+
+All owners, machine-readable (`prstate --all-orgs --json`), projected here with `jq`
+to keep the example short:
+
+```bash
+prstate --all-orgs --json | jq '{schema_version, scope, prs: [.prs[] | {key, ci: .ci.state, owed: (.owed | length)}]}'
+```
+
+```json
+{
+  "schema_version": 1,
+  "scope": "every owner",
+  "prs": [
+    {
+      "key": "acme/api#421",
+      "ci": "fail",
+      "owed": 0
+    }
+  ]
+}
+```
+
 `--json` is the stable contract; `schema_version` tracks it.
 
 ### Python
@@ -43,7 +129,7 @@ prstate --all-orgs --json     # every owner, machine-readable
 ```python
 import prstate
 
-sweep = prstate.fetch(owner="SakanaAIBusiness", author="@me")
+sweep = prstate.fetch(owner="acme", author="@me")
 for pr in sweep.prs:
     print(pr.ci, pr.owed, pr.bot_findings)
 ```

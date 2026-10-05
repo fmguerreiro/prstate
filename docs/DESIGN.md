@@ -1,8 +1,5 @@
 # prstate — design pass
 
-Seed implementation: `~/.agents/skills/babysit-all-prs/triage.py` (965 LOC) + `test_triage.py` (852 LOC).
-Citations below are `triage.py:LINE` unless stated otherwise.
-
 ## 1. Scope and non-goals
 
 prstate answers one question for a set of pull requests: **what is true right now, normalized**.
@@ -16,7 +13,7 @@ It is:
 It is NOT:
 - a merge queue, a bot, or a writer (never resolves a thread, never posts, never approves)
 - a TUI (gh-dash exists; this emits JSON and a flat report)
-- a judgment engine — no LLM calls, no "should you merge" beyond the mechanical `MERGE`/`NOT_READY` label triage.py already computes
+- a judgment engine — no LLM calls, no "should you merge" verdict beyond mechanical labels
 - a persistent store — no cache, no DB, no state between runs
 - a GitHub API client — it models exactly the fields these rules need, nothing more
 
@@ -37,9 +34,8 @@ class CiState(StrEnum):
 
 Five, not four. `NONE` is separate from `UNKNOWN` because "nothing ran" and "something
 ran and could not be read" are different claims, and only the first is normal for a
-docs-only PR (triage.py:664-668). `UNKNOWN` never collapses into `PASS`: the allowlists
-are allowlists, and an unrecognised conclusion ranks worse than green and better than
-red (triage.py:243-250).
+docs-only PR. `UNKNOWN` never collapses into `PASS`: the allowlists are allowlists, and
+an unrecognised conclusion ranks worse than green and better than red.
 
 ```python
 @dataclass(frozen=True)
@@ -59,8 +55,8 @@ class Ci:
     checks: tuple[Check, ...]  # post-collapse, one per (workflow, name)
 ```
 
-`pending` carries names, where triage.py:281 returned only a count. A count cannot tell
-a skill which check to wait on; the count is `len()`.
+`pending` carries names, not only a count. A count cannot tell a consumer which check to
+wait on; the count is `len()`.
 
 ```python
 class Surface(StrEnum):
@@ -123,24 +119,21 @@ class PullRequest:
     partial: tuple[str, ...]   # every reason this read may be incomplete
 ```
 
-`partial` is first-class, not a log line. triage.py collects it into one list consulted
-once, precisely because five separate `and not` clauses let truncation, unknown
-conclusions and an uncomputed merge state each slip into "needs nothing" in turn
-(triage.py:592-615). Same rule here: a consumer that ignores `partial` is choosing to,
-visibly.
+`partial` is first-class, not a log line. Truncation, unknown conclusions, and an
+uncomputed merge state must not each independently slip into "needs nothing." A consumer
+that ignores `partial` is choosing to, visibly.
 
-`bot_summaries` and `bot_findings` are ONE list here, where triage.py kept two
-(triage.py:466, 497). They differ by `state`/`surface`, not by kind, and every consumer
-concatenated them anyway (triage.py:674). `OPEN_THREAD` is the old `bot_findings`.
+`bot_summaries` and `bot_findings` are one list. They differ by `state` and `surface`,
+not by kind; `OPEN_THREAD` represents an unresolved bot-opened thread.
 
 ## 3. Normalization rules
 
 ### (a) Three-surface union
 
 Reviewer feedback lives on review threads, review bodies, and issue comments; a query
-reading one silently misses the rest (`pr-comment-surfaces/SKILL.md:12-25`). `gh pr view
---json comments` omits review comments entirely (cli/cli#11477), which is why this is a
-raw GraphQL query and not a `gh pr view` wrapper.
+reading one silently misses the rest. `gh pr view --json comments` omits review comments
+entirely (cli/cli#11477), which is why this is a raw GraphQL query and not a `gh pr view`
+wrapper.
 
 All three are fetched in the same per-PR fragment. De-duplication is by
 `(surface, thread_id, author, created_at)`; a review body and the thread comments
@@ -148,64 +141,58 @@ submitted with it are distinct rows and both survive — the review body is the 
 the thread comments are the findings.
 
 Thread comments are fetched as two connections, `opener: comments(first:1)` and
-`recent: comments(last:1)`, plus `totalCount` (triage.py:67-71). Indexing the tail of a
-`first:N` page returns comment N, not the newest, and "who spoke last" is the entire
-decision (triage.py:310-314). When `totalCount > len(fetched)` the middle is unread and
-that fact goes in `partial`, never silently into a verdict (triage.py:333-354).
+`recent: comments(last:1)`, plus `totalCount`. Indexing the tail of a `first:N` page
+returns comment N, not the newest, and "who spoke last" is the entire decision. When
+`totalCount > len(fetched)` the middle is unread and that fact goes in `partial`, never
+silently into a verdict.
 
 Every body is trimmed to 1500 chars **in the jq/GraphQL extraction layer**, not after
-transport: a `claude` bot review body measured 6.2 KB peak / 2 KB typical across 60 komb
-PRs, multiplied by every PR, every poll (`pr-comment-surfaces/SKILL.md:69-75`). The
-excerpt in the model is the first 200 chars of that (triage.py:423); the 1500-char body
-is what the CLI `--full` path prints. Acting on a trimmed body is out of scope: refetch
-by thread id.
+transport. The excerpt in the model is the first 200 chars of that; the 1500-char body is
+what the CLI `--full` path prints. Acting on a trimmed body is out of scope: refetch by
+thread id.
 
 ### (b) latest-per-check collapse
 
 Raw `statusCheckRollup.contexts` keeps every historical run on the head commit, so a
 check that failed and was re-run green still carries the old FAILURE (cli/cli#4946,
-cli/cli#14253; independently refiled at rjmurillo/ai-agents#3978, vig-os/devkit#176).
+cli/cli#14253).
 
-Collapse key is `(workflow_name, check_name)`, NOT check name (triage.py:181-240):
+Collapse key is `(workflow_name, check_name)`, NOT check name:
 
 - Supersession is per workflow. Within one workflow the higher `workflowRun.databaseId`
-  wins. Finish time cannot decide it — concurrent runs interleave, and on
-  komb-enterprise#530 the newer run's `lint` finished ten seconds before the older run's
-  (triage.py:186-190).
+  wins. Finish time cannot decide it — concurrent runs interleave, so a newer run can
+  finish before an older run.
 - Run ids are monotonic per repo, not per workflow, so a higher id from a different
   workflow proves only "started later". Two workflows may each define `test`; both
-  survive and `ci_state` unions them (triage.py:191-196).
+  survive and `ci_state` unions them.
 - Missing workflow provenance gets a unique synthetic key (`?{index}`), never a shared
   `""` bucket — sharing makes a StatusContext and a third-party check look like re-runs
-  of each other, and one's green then supersedes the other's red (triage.py:222-225).
-- Tie on `(run, when)` resolves to the worse state (triage.py:232-233).
+  of each other, and one's green then supersedes the other's red.
+- Tie on `(run, when)` resolves to the worse state.
 
 Rollup pagination: `contexts(first:100)` with `totalCount`. `totalCount > len(nodes)`
 appends to `partial`; `nodes` present with `totalCount` absent ALSO appends — defaulting
-a missing count to 0 makes a truncated read look complete (triage.py:599-604). prstate
-additionally follows `pageInfo.hasNextPage` on the rollup, which triage.py does not,
-so >100 contexts is a real read rather than a declared-partial one.
+a missing count to 0 makes a truncated read look complete. prstate additionally follows
+`pageInfo.hasNextPage` on the rollup, so >100 contexts is a real read rather than a
+declared-partial one.
 
 Then: any failed → `FAIL`; else any pending → `PENDING`; else any unknown → `UNKNOWN`;
-else `PASS` if checks exist, `NONE` if not (triage.py:273-281). The unknown list is
-reported whatever the headline, so a single QUEUED check cannot swallow it
-(triage.py:258-263).
+else `PASS` if checks exist, `NONE` if not. The unknown list is reported whatever the
+headline, so a single QUEUED check cannot swallow it.
 
 ### (c) owed = human signal with no later viewer activity
 
 "Unresolved" and "unanswered" are different; GitHub's resolve button is left untouched
-long after a conversation ends. A sweep that conflated them told the author to reply to
-a coral#48 comment he had answered three weeks earlier and to a hl#3270 review he had
-replied to that morning (`pr-comment-surfaces/SKILL.md:110-131`).
+long after a conversation ends. An earlier sweep told an author to reply to a comment
+they had answered three weeks earlier and to a review they had replied to that morning.
 
 "Later" means strictly greater `createdAt`/`submittedAt` than the signal's timestamp.
 Viewer activity = an issue comment, a submitted review, a review-thread comment, or the
-head commit landing (triage.py:357-371). Push time is `commits(last:1).committedDate`,
-deliberately the EARLY bound of the push interval: `pushedDate` is null for every commit
-now, and reading the push too late credits it with answering a review it may predate
-(triage.py:284-297).
+head commit landing. Push time is `commits(last:1).committedDate`, deliberately the EARLY
+bound of the push interval: `pushedDate` is null for every commit now, and reading the
+push too late credits it with answering a review it may predate.
 
-Per surface (triage.py:390-460):
+Per surface:
 
 - **thread** — unresolved, and walking the two fetched ends newest-first, the first
   non-bot author is not the viewer. A viewer comment at the newest end clears it; a
@@ -218,9 +205,8 @@ Per surface (triage.py:390-460):
   for a code change.
 
 `isOutdated` is NOT a filter here. Outdated means the commented line moved, which is not
-the concern being answered (`pr-comment-surfaces/SKILL.md:91-94`). It is carried as a
-field so a consumer asking "what still needs fixing" can filter; a consumer asking "what
-do I owe" must not.
+the concern being answered. It is carried as a field so a consumer asking "what still
+needs fixing" can filter; a consumer asking "what do I owe" must not.
 
 ### (d) bot supersede
 
@@ -230,34 +216,31 @@ matches the fallback bot allowlist or `[bot]` suffix.
 Order of evidence, strongest first:
 
 1. **GitHub's own minimize state.** `isMinimized` / `minimizedReason` on IssueComment,
-   PullRequestReviewComment and PullRequestReview. `marocchino/sticky-pull-request-comment`
-   (652★) made this the ecosystem norm write-side: a `header` key names the bot's comment
-   lane and `hide_and_recreate` + `hide_classify: OUTDATED` minimizes the prior comment
-   before posting the new one. A minimized comment with reason `OUTDATED` or `RESOLVED`
-   is superseded, full stop — no heuristic needed, and it is correct for bots that post
-   several concurrent lanes, which newest-per-login gets wrong.
+   PullRequestReviewComment and PullRequestReview. Sticky-comment bots commonly name a
+   comment lane, minimize the prior comment as `OUTDATED`, then post a replacement. A
+   minimized comment with reason `OUTDATED` or `RESOLVED` is superseded, full stop — no
+   heuristic needed, and it is correct for bots that post several concurrent lanes, which
+   newest-per-login gets wrong.
 2. **Newest-per-bot-login fallback**, for bots that do not minimize. A bot's own
    re-review supersedes its earlier summary; keep only the latest summary-shaped comment
-   or review body per login (triage.py:530-548). Unlike a review thread, which stays open
-   until the bot resolves it (triage.py:475-476).
+   or review body per login. Unlike a review thread, which stays open until the bot
+   resolves it.
 
 A summary is "summary-shaped" when it mentions a blocking count or opens a `Bug:`/`Issue:`
-line (triage.py:149-158). Keyword-grepping for "bug" trips on every clean review
-(`pr-comment-surfaces/SKILL.md:65-68`), which is why the marker regex is anchored.
+line. Keyword-grepping for "bug" trips on clean reviews, which is why the marker regex is
+anchored.
 
-Verdict → state (triage.py:556-569):
+Verdict → state:
 - unparseable → `UNKNOWN` (staleness adds nothing to a verdict never known)
 - predates the last push, count > 0 → `STALE` (real finding, unconfirmed against head)
 - predates the last push, count == 0 → `STALE_CLEAN` (no finding; a distinct state
-  because reusing `stale` pulled six clean PRs into the actionable bucket and knocked
-  #711 out of the merge bucket, 2026-08-24)
+  because reusing `stale` pulls clean PRs into the actionable bucket)
 - current, count == 0 → dropped, nothing owed
 - current, count > 0 → `BLOCKING`
 
-Viewer activity on the SAME surface after the summary suppresses it (triage.py:553-555).
+Viewer activity on the SAME surface after the summary suppresses it.
 Bot-opened unresolved threads are `OPEN_THREAD` regardless of push: ownership follows the
-opener, and a later human reply is evidence to inspect, not closure (triage.py:466-476;
-komb-enterprise#654/#655/#656).
+opener, and a later human reply is evidence to inspect, not closure.
 
 ## 4. Fetch layer
 
@@ -269,17 +252,17 @@ The cost — one subprocess per batch — is irrelevant at ~10 requests per swee
 **Discovery.** `gh search prs --state=open --author=@me --json number,repository` plus
 the scope flag. `gh search prs --json` lacks `mergeStateStatus`/`reviewDecision`
 (cli/cli#13239), so discovery yields identity only and the detail comes from GraphQL.
-Scope resolution mirrors triage.py:97-109: `--repo` > `--all-orgs` > `--org` > the owner
-of the repo in the working directory, labelled "owner" not "org" because gh reports users
-and organisations through the same field.
+Scope resolution is `--repo` > `--all-orgs` > `--org` > the owner of the repo in the
+working directory, labelled "owner" not "org" because gh reports users and organisations
+through the same field.
 
-**Batching.** Per-PR aliased fragments, `BATCH = 10` per request (triage.py:43), each
-alias a `repository(owner:,name:){pullRequest(number:)}`. Node-id batching is not used:
-aliases keep the query readable and let one bad PR fail in isolation.
+**Batching.** Per-PR aliased fragments, `BATCH = 10` per request, each alias a
+`repository(owner:,name:){pullRequest(number:)}`. Node-id batching is not used: aliases
+keep the query readable and let one bad PR fail in isolation.
 
 **Truncation detection.** Page sizes are named constants interpolated into the query
-(`THREAD_PAGE = 100`, `COMMENT_PAGE = 50`, `REVIEW_PAGE = 50`), hardcoding them twice is
-what let a smaller page silently stop the truncation check firing (triage.py:44-47).
+(`THREAD_PAGE = 100`, `COMMENT_PAGE = 50`, `REVIEW_PAGE = 50`); hardcoding them twice can
+silently stop the truncation check from firing.
 Rollup contexts follow `pageInfo.hasNextPage`. A thread whose `totalCount` exceeds its
 deduplicated opener and newest comment follows the thread node's comment cursor, because
 a viewer reply in the middle changes whether a human signal is owed. Either continuation
@@ -299,7 +282,7 @@ well under the 5000-point hourly budget; no client-side throttle.
 def fetch(
     *,
     author: str | None = "@me",      # PR author filter; None = any
-    reviewer: str | None = None,     # review-requested filter, for reviews-needed
+    reviewer: str | None = None,     # review-requested filter
     owner: str | None = None,        # None = owner of the cwd repo
     repo: str | None = None,         # "owner/name", narrows to one repo
     all_owners: bool = False,
@@ -309,7 +292,7 @@ def fetch(
 
 @dataclass(frozen=True)
 class Sweep:
-    scope: str                       # human label: "owner SakanaAIBusiness"
+    scope: str                       # human label: "owner acme"
     viewer: str                      # resolved login
     fetched_at: datetime
     prs: tuple[PullRequest, ...]
@@ -317,9 +300,9 @@ class Sweep:
 ```
 
 `viewer` defaults to `gh api user --jq .login`, never hardcoded. It is the login the
-owed rules test "later activity" against, and it is NOT necessarily the author: for
-`reviews-needed` the viewer is a reviewer looking at someone else's PR, and the same
-`owed` computation answers "what do I owe as reviewer" without a second code path.
+owed rules test "later activity" against, and it is NOT necessarily the author: a viewer
+can be a reviewer looking at someone else's PR, and the same `owed` computation answers
+"what do I owe as reviewer" without a second code path.
 
 Exported: `fetch`, `Sweep`, `PullRequest`, `Ci`, `Check`, `Owed`, `BotFinding`, the
 three enums, and `classify(raw_pr: dict, viewer: str, now: datetime) -> PullRequest`
@@ -343,8 +326,8 @@ OUTPUT  --json     the contract in the next block
 One command, flags compose. No subcommands: every consumer wants the same sweep with a
 different filter, and `prstate --owed` reads better than `prstate sweep --filter owed`.
 
-Default output is the flat bucketed report triage.py already renders (BUCKET, key, CI,
-MERGE, WHAT TO DO), because two skills print it nearly verbatim today.
+Default output is a flat bucketed report (BUCKET, key, CI, MERGE, WHAT TO DO), because
+some consumers print it nearly verbatim today.
 
 ### `--json` contract
 
@@ -352,22 +335,22 @@ MERGE, WHAT TO DO), because two skills print it nearly verbatim today.
 {
   "schema_version": 1,
   "fetched_at": "2026-09-25T08:00:00Z",
-  "scope": "owner SakanaAIBusiness",
-  "viewer": "fmguerreiro",
+  "scope": "owner acme",
+  "viewer": "alice",
   "partial": [],
   "prs": [{
-    "repo": "SakanaAIBusiness/komb-enterprise",
+    "repo": "acme/widgets",
     "number": 1262,
     "title": "...",
     "url": "https://github.com/...",
-    "author": "fmguerreiro",
+    "author": "alice",
     "draft": false,
     "base": "main",
     "updated_at": "2026-09-24T18:22:03Z",
     "mergeable": "MERGEABLE",
     "merge_state": "CLEAN",
     "review_decision": "APPROVED",
-    "approved_by": ["ryukez"],
+    "approved_by": ["bob"],
     "changes_requested_by": [],
     "ci": {
       "state": "fail",
@@ -379,7 +362,7 @@ MERGE, WHAT TO DO), because two skills print it nearly verbatim today.
                   "at": "2026-09-24T18:40:11Z"}]
     },
     "owed": [{
-      "surface": "thread", "by": "ryukez", "at": "2026-09-24T09:11:00Z",
+      "surface": "thread", "by": "bob", "at": "2026-09-24T09:11:00Z",
       "reason": "unresolved thread, last human word is theirs",
       "thread_id": "PRRT_kw...", "path": "backend/api.py",
       "outdated": false, "excerpt": "this drops the None case ..."
@@ -404,24 +387,21 @@ incomplete. Added keys bump nothing; removed or retyped keys bump `schema_versio
 **Internal**: the default report's exact columns, ordering within `checks`, excerpt
 length, and every module below `prstate.fetch`.
 
-## 6. Skill migration map
+## 6. Consumer migration map
 
-Ordered by duplication removed. **Gated: this edits `/Users/filipeguerreiro/projects/dotfiles`,
-a different repo from `~/work/prstate`, and only after prstate passes live smoke tests
-against real PRs. A half-migrated skill is a broken skill the user runs daily.**
+Ordered by duplication removed. **Gated: migrate downstream consumers only after prstate
+passes live smoke tests against real PRs. A half-migrated consumer is broken.**
 
-| # | Skill | Deleted | Replaced by |
-|---|---|---|---|
-| 1 | `babysit-all-prs` | `triage.py` (965) + `test_triage.py` (852) move into prstate wholesale; SKILL.md `## Why a script` and `## What counts as answered` shrink to a pointer | `prstate --json` + the judgment prose that remains |
-| 2 | `reviews-needed` | Phase 1 `gh pr list` block (:27-34), Phase 3 `gh pr view --json ... statusCheckRollup` + `--jq` projection (:48-55), the graphql reviewThreads block (:75-95), and the CI collapse paragraph (:69) | `prstate --review-requested --json`; Phases 4-5 (classify into buckets, render) stay — that is judgment |
-| 3 | `babysit-reviews` | Phase 1 two `gh search prs` calls (:51-57), Phase 2 `gh pr view --json` (:70-72) and the graphql thread block (:79-112), `## Auth and rate limits` (:179-182) | `prstate --review-requested --json` and `prstate --reviewed-by @me --json`, deduped by prstate |
-| 4 | `pr-comment-surfaces` | the GraphQL query (:42-53), the jq trim block (:77-82), and the per-surface answered rules (:110-131) become documentation OF prstate rather than instructions to re-derive | `prstate --repo X --owed --json`, single-PR via `--repo` + number |
-| 5 | `review-swarm` | Step 4 "fold in the existing conversation" thread enumeration | `prstate --repo X --json`, then triage as today. Step 8's resolve mutation stays in the skill — prstate never writes |
-| 6 | `pr-review-fanout` | the scope/own-pr reference blocks that re-derive discovery | `prstate` with the matching scope flags |
-| 7 | `standup` | nothing mechanical is shared beyond discovery; only the `gh pr list --state open` sweep (:52-54) | `prstate --json` for the open set; merged-PR history stays `gh pr list --state merged` (out of prstate's scope: prstate is open-PR state, not history) |
+| # | Consumer concern | Replaced by |
+|---|---|---|
+| 1 | Pull-request state collection and normalization | `prstate --json` plus consumer-specific judgment prose |
+| 2 | Review-requested pull-request discovery | `prstate --review-requested --json` |
+| 3 | Reviewer-specific pull-request discovery | `prstate --reviewed-by @me --json` |
+| 4 | Per-surface comment analysis | `prstate --repo owner/name --owed --json` |
+| 5 | Repository pull-request state | `prstate --repo owner/name --json` |
+| 6 | General pull-request discovery | `prstate` with matching scope flags |
+| 7 | Open pull-request discovery for status reports | `prstate --json`; merged-PR history remains outside prstate's scope |
 
-`standup` is last and smallest on purpose — it is mostly a writing skill, and pretending
-otherwise would inflate the payoff claim.
 
 ## 7. Module layout
 
@@ -442,8 +422,8 @@ tests/
 ```
 
 Seven files, each one job. `query.py` is separate from `gh.py` because the page-size
-constants must be provably reachable in the emitted query text — that is the whole point
-of triage.py:44-47 — and testing that needs the string without the subprocess.
+constants must be provably reachable in the emitted query text, and testing that needs
+the string without the subprocess.
 
 The boundary that matters: `gh.py` is the ONLY module that imports `subprocess`. Every
 rule in §3 is a pure function from a payload dict to a dataclass, so the entire rules
@@ -452,17 +432,17 @@ itself, and there are two: discovery parses, and a malformed batch marks partial
 
 Read-only enforcement is a unit test, not a convention: `gh.py` builds argv through one
 helper that rejects any subcommand outside `{search, api, auth, repo, pr}` and any
-`api` call whose query text contains `mutation` (triage.py carries the same allowlist).
+`api` call whose query text contains `mutation`.
 
 ## 8. Open decisions
 
 | Decision | Recommendation |
 |---|---|
 | Package / PyPI name | `prstate` both. Free on PyPI and npm (checked 2026-09-25). Import name matches the command. |
-| Python floor | **3.12.** It is the machine default; `StrEnum` (3.11+) and the generics used here all land. 3.13 buys nothing and narrows who can `pipx install` it. |
+| Python floor | **3.12.** `StrEnum` and the typing used here work on 3.12; requiring 3.13 would narrow who can `pipx install` it. |
 | Runtime dependencies | **Zero.** argparse, json, dataclasses, enum, subprocess, datetime. `gh` is the one external binary, already required for auth. Dev deps: pytest only. |
-| Fixture migration | Carry over test_triage.py's recorded payloads as `tests/fixtures/*.json`, one file per scenario, named for the RULE not the PR. Tests that pin rendering strings or internal function shapes do NOT come over. |
-| Rendered report or JSON only | **Keep the report.** Two skills print it near-verbatim today; dropping it moves formatting back into prose, which is the thing being deleted. `--json` is the contract, the report is the default. |
-| Skills shell out or import | **Shell out** to `prstate --json`. Skills are markdown run by an agent, not Python processes; a subprocess with a versioned JSON contract is the only interface that works from prose. |
-| Where the repo lives | `~/work/prstate`, **private** (`gh repo create --private`): the design carries internal org names and a specific incident reference. Public is a one-flag change later; the reverse is not. |
+| Fixture migration | Carry recorded payloads into `tests/fixtures/*.json`, one file per scenario, named for the rule rather than a pull request. Tests that pin rendering strings or internal function shapes do NOT come over. |
+| Rendered report or JSON only | **Keep the report.** Existing consumers print it near-verbatim; dropping it moves formatting back into each consumer. `--json` is the contract, the report is the default. |
+| Consumers shell out or import | **Shell out** to `prstate --json`. CLI consumers need a subprocess with a versioned JSON contract; Python callers can import `prstate.fetch`. |
+| Repository visibility | Private by default; public release is a later decision. |
 | Install path | `uv tool install` / `pipx install` from the git URL first. PyPI publish only if it outlives a month of daily use. |

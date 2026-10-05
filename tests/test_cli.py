@@ -33,7 +33,7 @@ NOW = datetime(2026, 9, 25, 8, 0, tzinfo=timezone.utc)
 def make_owed() -> Owed:
     return Owed(
         surface=Surface.THREAD,
-        by="ryukez",
+        by="reviewer",
         at=NOW,
         reason="unresolved thread, last human word is theirs",
         thread_id="PRRT_1",
@@ -100,7 +100,7 @@ def make_pr(
 def make_sweep(*prs: PullRequest, partial: tuple[str, ...] = ()) -> Sweep:
     return Sweep(
         scope="owner o",
-        viewer="fmguerreiro",
+        viewer="viewer",
         fetched_at=NOW,
         prs=prs,
         partial=partial,
@@ -204,17 +204,17 @@ def test_author_defaults_to_me_and_takes_a_login(stub, capsys):
     assert fetch.kwargs["author"] == "@me"
 
     fetch.calls.clear()
-    run(capsys, ["--author", "ryukez", "--json"])
-    assert fetch.kwargs["author"] == "ryukez"
+    run(capsys, ["--author", "alice", "--json"])
+    assert fetch.kwargs["author"] == "alice"
 
 
 def test_reviewer_flags_become_reviewer_kwargs(stub, capsys):
     fetch = stub(make_sweep(make_pr()))
 
-    run(capsys, ["--review-requested", "--reviewed-by", "ryukez", "--json"])
+    run(capsys, ["--review-requested", "--reviewed-by", "alice", "--json"])
 
     assert fetch.kwargs["reviewer"] == "@me"
-    assert fetch.kwargs["reviewed_by"] == "ryukez"
+    assert fetch.kwargs["reviewed_by"] == "alice"
     # A reviewer sweep unioned with your own authored PRs is not a reviewer sweep.
     assert fetch.kwargs["author"] is None
 
@@ -222,9 +222,9 @@ def test_reviewer_flags_become_reviewer_kwargs(stub, capsys):
 def test_an_explicit_author_still_narrows_a_reviewer_sweep(stub, capsys):
     fetch = stub(make_sweep(make_pr()))
 
-    run(capsys, ["--review-requested", "--author", "ryukez", "--json"])
+    run(capsys, ["--review-requested", "--author", "alice", "--json"])
 
-    assert fetch.kwargs["author"] == "ryukez"
+    assert fetch.kwargs["author"] == "alice"
     assert fetch.kwargs["reviewer"] == "@me"
 
 
@@ -245,13 +245,13 @@ def test_scope_flags_reach_fetch(stub, capsys):
         ["--repo", "o/n", "--all-orgs"],
         ["--org", "x", "--all-orgs"],
         ["--pr", "7"],
-        ["--repo", "o/n", "--pr", "7", "--author", "ryukez"],
+        ["--repo", "o/n", "--pr", "7", "--author", "alice"],
         ["--repo", "o/n", "--pr", "7", "--any-author"],
         ["--repo", "o/n", "--pr", "7", "--review-requested"],
-        ["--repo", "o/n", "--pr", "7", "--reviewed-by", "ryukez"],
-        ["--any-author", "--author", "ryukez"],
+        ["--repo", "o/n", "--pr", "7", "--reviewed-by", "alice"],
+        ["--any-author", "--author", "alice"],
         # argparse expands an abbreviation, so the conflict check must see it too.
-        ["--repo", "o/n", "--pr", "7", "--auth", "ryukez"],
+        ["--repo", "o/n", "--pr", "7", "--auth", "alice"],
         ["--ci", "green"],
     ],
 )
