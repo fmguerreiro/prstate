@@ -73,7 +73,7 @@ def test_bot_comments_are_never_owed():
 
 def test_github_bot_actor_is_not_owed_without_a_bot_login_suffix():
     payload = pr(comments={"nodes": [
-        comment("sakana-ai-github-app", at(5), "plan", actor_type="Bot"),
+        comment("review-helper", at(5), "plan", actor_type="Bot"),
     ]})
     assert owed(payload, ME) == ()
 
@@ -406,8 +406,7 @@ def test_rerun_red_supersedes_the_old_pass():
 
 
 def test_higher_run_id_wins_over_earlier_finish_time():
-    # Two runs of the same workflow race and the NEWER run's job finishes first
-    # (komb-enterprise#530). Ordering by completedAt picks the superseded verdict.
+    # Newer run finishes first; completedAt would choose the superseded verdict.
     ci = ci_of(check("lint", "FAILURE", run=100, completed="2026-01-01T00:10:00Z"),
                check("lint", "SUCCESS", run=200, completed="2026-01-01T00:09:50Z"))
     assert ci.state is CiState.PASS
@@ -520,8 +519,7 @@ def test_thread_page_at_its_limit_is_partial():
 
 
 def test_one_long_thread_is_not_partial():
-    # Its opener and its last comment decide the verdict and both are read, so
-    # flagging it buries a ready PR (it buried hl#3270 on three comments).
+    # Last comment is the viewer's reply, so unseen earlier asks are answered.
     payload = pr(reviewThreads={"nodes": [
         thread(comment("them", at(3), "q"), comment(ME, at(8), "done"), total=57),
     ]})
@@ -665,9 +663,6 @@ def test_blocking_summary_before_a_push_is_stale_and_still_blocking():
 
 
 def test_clean_summary_before_a_push_is_stale_clean_not_botfix():
-    # Six PRs whose bot said "Blocking: 0" before a later push were reported as
-    # owing a reply for a finding that never existed, and pulled an approved,
-    # green PR (#711) out of the merge bucket (2026-08-24).
     clean = summary_pr(comment("claude", at(5), CLEAN_BODY), pushed=at(6))
     assert [(f.state, f.verdict) for f in bot_findings(clean, ME)] == [
         (BotState.STALE_CLEAN, 0)]

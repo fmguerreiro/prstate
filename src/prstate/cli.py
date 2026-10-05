@@ -1,8 +1,4 @@
-"""The command line: flags in, a sweep out, nothing written back to GitHub.
-
-Skills shell out to this rather than import the library (DESIGN §8), so anything the
-library can express the flags must be able to produce.
-"""
+"""Read-only CLI exposing the library's pull-request filters."""
 
 from __future__ import annotations
 

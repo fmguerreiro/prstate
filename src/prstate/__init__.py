@@ -1,10 +1,4 @@
-"""Normalized GitHub pull-request review state.
-
-    import prstate
-    sweep = prstate.fetch(owner="SakanaAIBusiness", author="@me")
-    for pr in sweep.prs:
-        pr.ci, pr.owed, pr.bot_findings
-"""
+"""Normalized GitHub pull-request review state."""
 
 from prstate.classify import classify
 from prstate.gh import GhError, fetch

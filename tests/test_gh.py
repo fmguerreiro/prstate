@@ -150,10 +150,10 @@ def discovery_flags(calls):
 
 def test_discover_sends_one_search_per_filter(monkeypatch):
     calls = stub_gh(monkeypatch, lambda cmd: "[]")
-    gh.discover(author="@me", reviewer="@me", reviewed_by="fmguerreiro",
+    gh.discover(author="@me", reviewer="@me", reviewed_by="alice",
                 scope_flags=["--owner=acme"], limit=50)
     assert discovery_flags(calls) == [["--author=@me"], ["--review-requested=@me"],
-                                      ["--reviewed-by=fmguerreiro"]]
+                                      ["--reviewed-by=alice"]]
     for cmd in calls:
         assert cmd[:4] == ["gh", "search", "prs", "--state=open"]
         assert "--limit=50" in cmd and "--owner=acme" in cmd

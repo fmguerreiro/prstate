@@ -177,13 +177,7 @@ def resolve_scope(*, repo: str | None = None, owner: str | None = None,
 def discover(*, author: str | None = None, reviewer: str | None = None,
              reviewed_by: str | None = None, scope_flags: list[str] | None = None,
              limit: int = 200) -> list[dict]:
-    """Open PRs matching each filter, unioned and deduped by (repo, number).
-
-    One search per filter, because gh ANDs them into one query otherwise and
-    babysit-reviews wants --review-requested OR --reviewed-by in a single sweep.
-    `gh search prs --json` lacks mergeStateStatus/reviewDecision (cli/cli#13239), so
-    this yields identity only and the detail comes from GraphQL.
-    """
+    """Union searches per filter because gh combines filters with AND."""
     filters = [flag for flag in (f"--author={author}" if author else None,
                                  f"--review-requested={reviewer}" if reviewer else None,
                                  f"--reviewed-by={reviewed_by}" if reviewed_by else None)

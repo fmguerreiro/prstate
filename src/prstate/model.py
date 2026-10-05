@@ -1,7 +1,4 @@
-"""The shared contract: every other module imports this one and it imports none of them.
-
-Field order is the `--json` key order, and `--json` is what seven skills consume.
-"""
+"""Shared data contract with stable JSON field order."""
 
 from __future__ import annotations
 
