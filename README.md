@@ -151,3 +151,7 @@ other auth command, and token display. It never reads or prints a token directly
 ## Design
 
 `docs/DESIGN.md`.
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).
