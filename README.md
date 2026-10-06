@@ -1,3 +1,5 @@
+<p align="center"><img src="icon.webp" alt="prstate icon" width="160"></p>
+
 # prstate
 
 Normalized GitHub pull-request review state, as a library and a CLI.
