@@ -1,8 +1,11 @@
-<p align="center"><img src="icon.webp" alt="prstate icon" width="160"></p>
-
-# prstate
-
-Normalized GitHub pull-request review state, as a library and a CLI.
+<div align="center">
+  <a href="https://github.com/fmguerreiro/prstate">
+    <img src="icon.webp" alt="prstate" width="96" height="96" />
+  </a>
+  <h1>prstate</h1>
+  <p><em>Normalized GitHub pull-request review state, as a library and a CLI.</em></p>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-4c1.svg" alt="MIT License" /></a>
+</div>
 
 Three axes per PR:
 
